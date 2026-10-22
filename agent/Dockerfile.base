@@ -1,0 +1,6 @@
+# Cache the upstream Gitea MCP binary for reuse across per-task worker images.
+# The task cleanroom, Node and Copilot are assembled in agent/Dockerfile.
+ARG GITEA_MCP_SERVER_IMAGE=docker.gitea.com/gitea-mcp-server:latest
+FROM ${GITEA_MCP_SERVER_IMAGE} AS mcp_src
+FROM scratch
+COPY --from=mcp_src --chmod=755 /app/gitea-mcp /usr/local/bin/gitea-mcp

@@ -1,0 +1,10 @@
+# Keep credentials, private experiment state and generated artifacts out of builds.
+.git
+.env*
+.claude*
+**/node_modules
+**/__pycache__
+mini-router/dist
+out
+docker/_gen-prod.*.yml
+*.log
