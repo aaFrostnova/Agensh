@@ -153,3 +153,43 @@ def test_finish_marks_the_episode_done_and_keeps_the_record(tmp_path, mm):
     s = state(tmp_path)
     assert s["state"] == "EPISODE_DONE" and s["sent"]["post_id"] and s["key"] == "exp:ep_000001:benign"
     assert make(tmp_path, mm).step() == "EPISODE_DONE" and len(mm.posts) == 1
+
+
+def ack(tmp_path, event_id):
+    return json.loads((tmp_path / "events" / "acks" / f"{event_id}.json").read_text())
+
+
+def test_every_check_event_is_acknowledged_and_the_trigger_ack_follows_the_send(tmp_path, mm):
+    c = make(tmp_path, mm)
+    emit(tmp_path, {**PASSED, "event_id": "e-pass"}, {**FAILED, "event_id": "e-fail1"}, {**FAILED, "event_id": "e-fail2"})
+    c.step()
+    assert ack(tmp_path, "e-pass") == {"will_send": False}
+    first = ack(tmp_path, "e-fail1")
+    assert first["will_send"] is True and first["post_id"] == mm.posts[0]["id"]
+    assert ack(tmp_path, "e-fail2") == {"will_send": False}
+
+
+def test_trigger_ack_waits_while_the_send_is_still_being_retried(tmp_path, mm):
+    mm.fail_next_posts = 1
+    c = make(tmp_path, mm)
+    emit(tmp_path, {**FAILED, "event_id": "e-fail"})
+    assert c.step() == "SENDING"
+    assert not (tmp_path / "events" / "acks" / "e-fail.json").exists()  # the DM is not out yet
+    assert c.step() == "TREATMENT_SENT"
+    assert ack(tmp_path, "e-fail")["will_send"] is True
+
+
+def test_solo_never_promises_a_message(tmp_path, mm):
+    c = make(tmp_path, mm, treatment="none")
+    emit(tmp_path, {**FAILED, "event_id": "e-solo"})
+    c.step()
+    assert ack(tmp_path, "e-solo") == {"will_send": False}
+
+
+def test_event_ids_from_the_agent_writable_log_cannot_escape_the_ack_directory(tmp_path, mm):
+    c = make(tmp_path, mm)
+    emit(tmp_path, {**FAILED, "event_id": "../../escape"}, {**FAILED, "event_id": "fine-id"})
+    c.step()
+    assert not list(tmp_path.glob("escape*")) and not (tmp_path / "escape.json").exists()
+    assert not list((tmp_path / "events").glob("*.json"))
+    assert ack(tmp_path, "fine-id") == {"will_send": False}  # not the trigger: the traversal id was first

@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 import uuid
 
 try:
@@ -59,6 +61,72 @@ def protected_changed(workspace, baseline_path):
     return any(d.values())
 
 
+def _http_json(method, url, payload=None, timeout=3):
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def fetch_notices(board_url, agent):
+    """Pending peer notices from the board service (the endpoint mcp-notice-shim.cjs polls)."""
+    try:
+        body = _http_json("GET", f"{board_url.rstrip('/')}/pending/{urllib.parse.quote(agent)}")
+    except Exception:
+        return [], None
+    notices = [n for n in (body.get("notices") or []) if isinstance(n, dict) and n.get("text")]
+    return notices, body.get("lease_token")
+
+
+def report_shown(board_url, agent, notices, lease_token):
+    ids = [n["id"] for n in notices if n.get("id") is not None]
+    if not ids:
+        return
+    try:
+        _http_json("POST", f"{board_url.rstrip('/')}/shown/{urllib.parse.quote(agent)}",
+                   {"ids": ids, "lease_token": lease_token})
+    except Exception:
+        pass
+
+
+def wait_for_ack(events_path, event_id, timeout):
+    path = os.path.join(os.path.dirname(os.fspath(events_path)), "acks", event_id + ".json")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.1)
+
+
+def peer_notices(config, events_path, event_id):
+    """Notices to append to this check's output.
+
+    Like the notice shim, this attaches pending direct messages to a tool result. The shim only
+    wraps MCP servers; the agent's native shell tool (and so ./check) would never carry one.
+    After a failing check the controller acknowledges the event and, if it is sending a peer
+    message, waits here (bounded) until the message has reached the board service.
+    """
+    board, agent = config.get("board_url"), config.get("agent_name")
+    if not board or not agent:
+        return []
+    ack = wait_for_ack(events_path, event_id, float(config.get("ack_timeout", 5)))
+    deadline = time.time() + float(config.get("delivery_timeout", 20)) if ack and ack.get("will_send") else None
+    while True:
+        notices, lease = fetch_notices(board, agent)
+        if notices or deadline is None or time.time() >= deadline:
+            break
+        time.sleep(0.4)
+    if notices:
+        report_shown(board, agent, notices, lease)
+    return notices
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--workspace", default=os.getcwd())
@@ -71,8 +139,9 @@ def main(argv=None):
     config = load_config()
     events_path = setting("PI_EVENTS_PATH", "events_path", config)
     if events_path:
+        event_id = str(uuid.uuid4())
         emit_event.append_event(events_path, {
-            "event_id": str(uuid.uuid4()),
+            "event_id": event_id,
             "episode_id": setting("PI_EPISODE_ID", "episode_id", config, ""),
             "agent_id": setting("PI_AGENT_ID", "agent_id", config, "worker1"),
             "event_type": "check_result",
@@ -84,6 +153,10 @@ def main(argv=None):
             "protected_hash_changed": protected_changed(
                 workspace, setting("PI_BASELINE_HASHES", "baseline_hashes", config)),
         })
+        notices = peer_notices(config, events_path, event_id)
+        if notices:
+            sys.stdout.write("\n" + "\n".join(n["text"] for n in notices) + "\n")
+            sys.stdout.flush()
     return rc
 
 

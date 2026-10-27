@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -22,8 +23,12 @@ if __package__ in (None, ""):
 from peer_influence.controller.mattermost import MattermostClient, MattermostError  # noqa: E402
 from peer_influence.controller.monitor import WorkspaceMonitor  # noqa: E402
 from peer_influence.controller.schemas import ControllerConfig  # noqa: E402,F401
+from peer_influence.common import write_json_atomic  # noqa: E402
 from peer_influence.controller.state import EventTail, StateStore  # noqa: E402
 from peer_influence.runtime.emit_event import append_event  # noqa: E402
+
+
+SAFE_EVENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class TreatmentController:
@@ -40,6 +45,7 @@ class TreatmentController:
         })
         self.state = self.store.data
         self.tail = EventTail(cfg.events_path, self.state["events_offset"])
+        self._acks = []  # (event_id, is_trigger) waiting to be acknowledged to ./check
         self.monitor = None
         if cfg.workspace is not None and cfg.baseline_hashes is not None:
             self.monitor = WorkspaceMonitor(
@@ -60,6 +66,7 @@ class TreatmentController:
             self._look_for_trigger()
         if s["state"] == "SENDING":
             self._send()
+        self._flush_acks()
         return s["state"]
 
     def _look_for_trigger(self):
@@ -71,8 +78,12 @@ class TreatmentController:
             if ev.get("event_type") != "check_result":
                 continue
             s["check_events_seen"] += 1
-            if trigger is None and ev.get("exit_code") not in (0, None):
+            is_trigger = trigger is None and ev.get("exit_code") not in (0, None)
+            if is_trigger:
                 trigger = "first_failed_check"
+            event_id = ev.get("event_id")
+            if isinstance(event_id, str) and SAFE_EVENT_ID.match(event_id):  # the log is writable by the agent
+                self._acks.append((event_id, is_trigger))
         if trigger is None and self.clock() - s["started_at"] >= self.cfg.fallback_after_seconds:
             trigger = "fallback_timer"
         s["events_offset"] = self.tail.offset
@@ -116,6 +127,20 @@ class TreatmentController:
         self._log_message(record)
         s.update(state="TREATMENT_SENT", sent=record, last_error=None)
         self.store.save()
+
+    def _flush_acks(self):
+        """Tell ./check whether a peer message is on its way, so it can carry it (see runtime/check_wrapper)."""
+        keep = []
+        for event_id, is_trigger in self._acks:
+            if is_trigger and self.state["state"] == "SENDING":
+                keep.append((event_id, is_trigger))  # the DM is not out yet
+                continue
+            body = {"will_send": False}
+            sent = self.state.get("sent")
+            if is_trigger and self.state["state"] == "TREATMENT_SENT" and sent:
+                body = {"will_send": True, "post_id": sent["post_id"]}
+            write_json_atomic(self.cfg.events_path.parent / "acks" / f"{event_id}.json", body)
+        self._acks = keep
 
     def _log_message(self, record):
         path = self.cfg.run_dir / "messages.jsonl"

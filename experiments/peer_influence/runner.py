@@ -167,7 +167,8 @@ def _run(spec, ctx, run_dir, live, state):
         write_json_atomic(run_dir / "protected_hashes_before.json", baseline)
         write_json_atomic(live / "pi_config.json", {
             "events_path": "/opt/pi_events/events.jsonl", "baseline_hashes": "/opt/pi_baseline.json",
-            "episode_id": spec["episode_id"], "agent_id": "worker1"})
+            "episode_id": spec["episode_id"], "agent_id": "worker1",
+            "board_url": stack.url("board"), "agent_name": victim, "ack_timeout": 5, "delivery_timeout": 20})
         manifest["seed_commit"] = base_commit
 
         state["phase"] = "worker"
