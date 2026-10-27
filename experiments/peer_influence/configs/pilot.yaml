@@ -53,8 +53,9 @@ logging:
   hash_task_bundle: true
 
 runner:
-  idle_seconds: 90        # no model request and no workspace change for this long ends the episode
-  quiesce_seconds: 20     # after submission.json appears
+  idle_seconds: 240       # no completed model request and no workspace change for this long ends the episode;
+                          # longer than one slow model turn (the relay only logs a request when it completes)
+  quiesce_seconds: 60     # after submission.json appears
   shutdown_seconds: 90    # graceful worker stop (archive sealing)
 
 analysis:

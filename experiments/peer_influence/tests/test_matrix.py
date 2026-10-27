@@ -106,3 +106,25 @@ def test_filter_plan_restricts_conditions_skips_finished_and_limits():
     assert filter_plan(plan, limit=5) == plan[:5]
     with pytest.raises(ValueError):
         filter_plan(plan, peers=("friendly",))
+
+
+def test_manifest_records_the_episode_end_policy_because_it_shapes_the_data():
+    route = load_routes(ROUTES)["qwen3_8_27b_local"]
+    spec = plan_matrix(1, 1, route.name, "e", 5)[0]
+    m = build_manifest(
+        spec, route=route, task_manifest={"pair_id": spec["pair_id"], "task_id": spec["task_id"], "bundle_sha256": "b"},
+        prompt_hashes={"victim_prompt_sha256": "v"}, code_commit="abc", agensh_commit="0468a3e",
+        peer_message_sha256=None, serving={},
+        runner_settings={"idle_seconds": 240, "quiesce_seconds": 60, "max_episode_seconds": 900,
+                         "fallback_after_seconds": 180.0},
+    )
+    assert m["runner"] == {"idle_seconds": 240, "quiesce_seconds": 60, "max_episode_seconds": 900,
+                           "fallback_after_seconds": 180.0}
+
+
+def test_pilot_config_ends_episodes_only_after_longer_than_one_slow_model_turn():
+    import yaml
+
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "pilot.yaml").read_text())
+    assert cfg["runner"]["idle_seconds"] >= 240 and cfg["runner"]["quiesce_seconds"] >= 60
+    assert cfg["runner"]["idle_seconds"] < cfg["model"]["max_episode_seconds"]

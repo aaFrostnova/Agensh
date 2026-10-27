@@ -32,8 +32,8 @@ def free_port():
         return s.getsockname()[1]
 
 
-def find_descendant(root_pid, needle):
-    """Pid of a descendant of root_pid whose command line contains `needle` (scans /proc)."""
+def find_descendant(root_pid, match):
+    """Pid of the first descendant of root_pid whose argv satisfies `match` (scans /proc)."""
     children = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -48,13 +48,19 @@ def find_descendant(root_pid, needle):
     while queue:
         pid = queue.pop(0)
         try:
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")[:-1]
         except OSError:
-            cmdline = ""
-        if needle in cmdline:
+            argv = []
+        if argv and match(argv):
             return pid
         queue.extend(children.get(pid, []))
     return None
+
+
+def is_entrypoint(argv):
+    """True only for the entrypoint shell itself. bubblewrap's own argv ends with the same
+    script path, and signalling its namespace init would SIGKILL the whole sandbox."""
+    return len(argv) == 2 and os.path.basename(argv[0]) == "bash" and argv[1] == "/opt/omcgitea/entrypoint.sh"
 
 
 _SWEEP = "if int(uid) == child_uid:"
@@ -444,20 +450,21 @@ LEVEL = Warn
                 ok, err = (ok + 1, err) if m.group(2) == "200" else (ok, err + 1)
         return {"responses_ok": ok, "responses_error": err}
 
-    def dm_posts(self, channel_id):
+    def dm_posts(self, channel_ids):
+        """Every post in the given DM channels (the victim has one with the harness, one with the peer)."""
         token = self.mm_login("mmadmin", self.pw["mm"])
         h = {"Authorization": f"Bearer {token}"}
-        page = requests.get(self.url("mm") + f"/api/v4/channels/{channel_id}/posts?per_page=100", headers=h, timeout=15).json()
-        names = {}
-        out = []
-        for pid in reversed(page.get("order", [])):
-            p = page["posts"][pid]
-            uid = p["user_id"]
-            if uid not in names:
-                names[uid] = requests.get(self.url("mm") + f"/api/v4/users/{uid}", headers=h, timeout=15).json()["username"]
-            out.append({"id": pid, "user": names[uid], "message": p["message"], "create_at": p["create_at"],
-                        "props": p.get("props") or {}})
-        return {"channel_id": channel_id, "posts": out}
+        names, out = {}, []
+        for channel_id in channel_ids:
+            page = requests.get(self.url("mm") + f"/api/v4/channels/{channel_id}/posts?per_page=100", headers=h, timeout=15).json()
+            for pid in reversed(page.get("order", [])):
+                p = page["posts"][pid]
+                uid = p["user_id"]
+                if uid not in names:
+                    names[uid] = requests.get(self.url("mm") + f"/api/v4/users/{uid}", headers=h, timeout=15).json()["username"]
+                out.append({"id": pid, "user": names[uid], "channel_id": channel_id, "message": p["message"],
+                            "create_at": p["create_at"], "props": p.get("props") or {}})
+        return {"channel_ids": list(channel_ids), "posts": out}
 
     def stop_worker(self, timeout=90):
         """Let the entrypoint run its shutdown path (cancel tools, seal the HOME/workspace archive).
@@ -466,7 +473,7 @@ LEVEL = Warn
         dying would SIGKILL the whole PID namespace before the archive is written."""
         for name, proc in self.procs:
             if name == "worker" and proc.poll() is None:
-                inner = find_descendant(proc.pid, "/opt/omcgitea/entrypoint.sh")
+                inner = find_descendant(proc.pid, is_entrypoint)
                 if inner:
                     os.kill(inner, signal.SIGTERM)
                     try:

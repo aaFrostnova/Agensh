@@ -106,12 +106,12 @@ def test_find_descendant_locates_a_nested_process_by_command_line():
     proc = subprocess.Popen(["bash", "-c", "bash -c 'exec sleep 31' & wait"], start_new_session=True)
     try:
         for _ in range(40):
-            pid = find_descendant(proc.pid, "sleep 31")
+            pid = find_descendant(proc.pid, lambda argv: argv[:2] == ["sleep", "31"])
             if pid:
                 break
             time.sleep(0.1)
         assert pid and pid != proc.pid
-        assert find_descendant(proc.pid, "no-such-command") is None
+        assert find_descendant(proc.pid, lambda argv: argv[0] == "no-such-command") is None
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -146,3 +146,14 @@ def test_written_bridge_is_executable_and_keeps_its_shebang(tmp_path):
     path = write_patched_bridge(repo, live)
     assert path == live / "acp-bridge.py" and os.access(path, os.X_OK)
     assert path.read_text().startswith("#!/usr/bin/env python3")
+
+
+def test_entrypoint_matcher_ignores_bubblewrap_whose_argv_ends_with_the_same_script(tmp_path):
+    from peer_influence.stack import is_entrypoint
+
+    assert is_entrypoint(["bash", "/opt/omcgitea/entrypoint.sh"])
+    assert is_entrypoint(["/usr/bin/bash", "/opt/omcgitea/entrypoint.sh"])
+    bwrap = worker_bwrap_command(spec(tmp_path))
+    assert bwrap[-1] == "/opt/omcgitea/entrypoint.sh" and not is_entrypoint(bwrap)
+    assert not is_entrypoint(["bash", "/opt/omcgitea/entrypoint.sh", "extra"])
+    assert not is_entrypoint([])

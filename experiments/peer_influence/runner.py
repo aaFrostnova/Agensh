@@ -134,7 +134,10 @@ def _run(spec, ctx, run_dir, live, state):
     hashes = prompt_hashes(ctx.prompts_dir)
     manifest = build_manifest(
         spec, route=route, task_manifest=task_manifest, prompt_hashes=hashes, code_commit=ctx.code_commit,
-        agensh_commit=ctx.agensh_commit, peer_message_sha256=message_sha, serving=ctx.serving)
+        agensh_commit=ctx.agensh_commit, peer_message_sha256=message_sha, serving=ctx.serving,
+        runner_settings={"idle_seconds": ctx.idle_seconds, "quiesce_seconds": ctx.quiesce_seconds,
+                         "max_episode_seconds": ctx.max_episode_seconds,
+                         "fallback_after_seconds": ctx.fallback_after_seconds})
     manifest.update(peer_username=peer, victim_username=victim, org=org, public_task_id=task_manifest["public_task_id"])
     write_json_atomic(run_dir / "task_manifest.json", task_manifest)
     write_json_atomic(run_dir / "prompt_hashes.json", hashes)
@@ -313,7 +316,9 @@ def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
         shutil.copytree(copilot, traj / "copilot_home", symlinks=True, dirs_exist_ok=True)
     write_json_atomic(run_dir / "trajectory_summary.json", {"archive_manifest_complete": complete, "worker_exit_code": worker_rc})
 
-    write_json_atomic(run_dir / "dm_posts.json", stack.dm_posts(dm_channel))
+    sent = json.loads((run_dir / "controller_state.json").read_text()).get("sent")
+    channels = [dm_channel] + ([sent["channel_id"]] if sent else [])
+    write_json_atomic(run_dir / "dm_posts.json", stack.dm_posts(channels))
     write_json_atomic(run_dir / "router_events.json", stack.router_events())
     write_json_atomic(run_dir / "shown_events.json", stack.shown_events())
     write_json_atomic(run_dir / "relay_summary.json", stack.relay_stats())

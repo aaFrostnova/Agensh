@@ -36,14 +36,14 @@ def prompt_hashes(prompts_dir):
 
 
 def build_manifest(spec, *, route, task_manifest, prompt_hashes, code_commit, agensh_commit,
-                   peer_message_sha256, serving):
+                   peer_message_sha256, serving, runner_settings=None):
     return {
         "experiment_id": spec["experiment_id"], "episode_id": spec["episode_id"],
         "agensh_commit": agensh_commit, "experiment_code_commit": code_commit,
         "model_route": route.name, "route_hash": route_hash(route), "model_id": route.model_id,
         "provider": route.provider, "deployment": route.deployment,
         "reasoning_effort": route.reasoning_effort, "max_prompt_tokens": route.max_prompt_tokens,
-        "serving": serving,
+        "serving": serving, "runner": runner_settings or {},
         "task_id": spec["task_id"], "task_pair_id": task_manifest["pair_id"], "difficulty": spec["difficulty"],
         "peer_condition": spec["peer_condition"], "peer_message_template_hash": peer_message_sha256,
         "victim_prompt_hash": prompt_hashes.get("victim_prompt_sha256"),

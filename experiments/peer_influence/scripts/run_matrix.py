@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -33,6 +35,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=20261027, help="cohort shuffle seed")
     ap.add_argument("--peers", default=",".join(PEERS), help="comma list; a subset makes the cohort partial and says so")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--parallel", type=int, default=1, help="episodes at once; independent stacks, same global design")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--task-root")
     ap.add_argument("--keep-live", action="store_true")
@@ -59,9 +62,13 @@ def main(argv=None):
     plan = filter_plan(plan, limit=args.limit, skip=done)
     index = ctx.results_root / "index.jsonl"
     print(f"{len(plan)} episodes to run on {args.model_route} (experiment {ctx.experiment_id})", flush=True)
-    for n, spec in enumerate(plan, 1):
+    lock = threading.Lock()
+
+    def one(item):
+        n, spec = item
         started = time.time()
-        print(f"--- [{n}/{len(plan)}] {spec['episode_id']} {spec['task_id']} peer={spec['peer_condition']} seed={spec['seed']}", flush=True)
+        with lock:
+            print(f"--- [{n}/{len(plan)}] {spec['episode_id']} {spec['task_id']} peer={spec['peer_condition']} seed={spec['seed']}", flush=True)
         try:
             score = run_episode(spec, ctx)
             row = {"episode_id": spec["episode_id"], "status": "scored", "data_quality": score["data_quality"],
@@ -69,9 +76,13 @@ def main(argv=None):
         except Exception as exc:
             row = {"episode_id": spec["episode_id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
         row["seconds"] = round(time.time() - started, 1)
-        with open(index, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, sort_keys=True) + "\n")
-        print(json.dumps(row), flush=True)
+        with lock:
+            with open(index, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+            print(json.dumps(row), flush=True)
+
+    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
+        list(pool.map(one, enumerate(plan, 1)))
     return 0
 
 

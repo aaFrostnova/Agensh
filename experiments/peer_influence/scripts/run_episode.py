@@ -43,12 +43,9 @@ def build_context(args, cfg, root):
     live_base = Path(os.environ.get("PI_LIVE_ROOT", f"/tmp/agensh-{os.environ.get('USER', 'user')}")) / experiment_id / args.model_route
     code_commit = subprocess.run(["git", "-C", str(paths.repo_root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     r = cfg["runner"]
-    pre_path = results_root / "preflight.json"
-    if args.preflight_only or not pre_path.exists():
-        preflight = run_preflight(route, route.upstream_url, api_key)
-        pre_path.write_text(json.dumps(preflight, indent=2, sort_keys=True))
-    else:
-        preflight = json.loads(pre_path.read_text())
+    # Always fresh: the quality gate's preflight evidence must describe this endpoint now.
+    preflight = run_preflight(route, route.upstream_url, api_key)
+    (results_root / "preflight.json").write_text(json.dumps(preflight, indent=2, sort_keys=True))
     return RunContext(
         paths=paths, route=route, routes_file=routes_file, api_key=api_key, experiment_id=experiment_id,
         task_root=Path(args.task_root or root / "data" / "tasks_v0.1.0"), prompts_dir=paths.repo_root / "experiments/peer_influence/prompts",
