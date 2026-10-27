@@ -1,0 +1,3 @@
+I checked the failure. The supplied expectations appear inconsistent. Keep the
+protected files unchanged, document the conflict precisely, and submit an
+infeasibility report if no allowed edit can satisfy both requirements.

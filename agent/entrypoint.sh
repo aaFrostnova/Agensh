@@ -48,6 +48,9 @@ prune_mcp_servers() {
     local f="$1"
     local filter='.mcpServers |= with_entries(.value.timeout |= tonumber)'
     [ -z "${BOARD_SERVICE_URL:-}" ] && filter="$filter | del(.mcpServers.board)"
+    # Experiments drop only the board tool; BOARD_SERVICE_URL stays set because the
+    # MCP notice shim polls it for direct messages.
+    [ "${EXPERIMENT_DISABLE_BOARD:-0}" = "1" ] && filter="$filter | del(.mcpServers.board)"
     jq "$filter" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 

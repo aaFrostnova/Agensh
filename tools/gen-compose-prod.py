@@ -2,11 +2,22 @@
 # Emit the team Compose base to stdout, expanding one worker/router pair per agent.
 # Make writes this to docker/_gen-prod.<profile>.yml and adds the pbench overlay.
 
+import json
 import os
+import sys
+from pathlib import Path
 
 WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
 
 ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
+
+# Opt-in experiment mode (experiments/peer_influence): per-worker prompt, board and start settings.
+ROLE_CONFIG = os.environ.get("AGENT_ROLE_CONFIG", "").strip()
+EXPERIMENT_MODE = os.environ.get("EXPERIMENT_MODE", "").strip()
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# A Compose profile nobody enables: its services are generated (so accounts and tokens
+# exist) but never started.
+IDLE_PROFILE = "scripted-peer-idle"
 
 # Shared anchors keep model settings, limits and board access identical across workers.
 HEADER = '''
@@ -369,18 +380,67 @@ ROUTER_BLOCK = '''
       retries: 6
 '''
 
+def load_roles():
+    """Per-worker roles; empty unless AGENT_ROLE_CONFIG and EXPERIMENT_MODE=peer_influence are both set."""
+    if bool(ROLE_CONFIG) != (EXPERIMENT_MODE == "peer_influence"):
+        sys.exit("FATAL: AGENT_ROLE_CONFIG and EXPERIMENT_MODE=peer_influence must be set together")
+    if not ROLE_CONFIG:
+        return {}
+    roles = json.loads(Path(ROLE_CONFIG).read_text())
+    for worker, role in roles.items():
+        if worker not in ALL_AGENTS:
+            sys.exit(f"FATAL: role config names {worker}, which is not one of this team's workers")
+        prompt = role.get("prompt_path")
+        if prompt and not (REPO_ROOT / prompt).is_file():
+            sys.exit(f"FATAL: prompt_path {prompt} for {worker} does not exist")
+    return roles
+
+
+def agent_block(short, role=None):
+    block = AGENT_BLOCK.replace("__SHORT__", short)
+    if not role:
+        return block
+    if not role.get("start_llm", True):
+        head = f"  agent-{short}:\n"
+        block = block.replace(head, head + f'    profiles: ["{IDLE_PROFILE}"]\n', 1)
+    if role.get("prompt_path"):
+        block = block.replace(
+            "      - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro",
+            f"      - ../{role['prompt_path']}:/opt/omcgitea/prompts/agents.md:ro", 1)
+    if not role.get("board_enabled", True):
+        # Keep BOARD_SERVICE_URL: the MCP notice shim polls it for direct messages.
+        line = f'      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-${{ORG_NAME}}-{short}.token"\n'
+        block = block.replace(line, line + '      BOARD_IDS: ""\n      EXPERIMENT_DISABLE_BOARD: "1"\n', 1)
+    return block
+
+
+def router_block(short, role=None):
+    block = ROUTER_BLOCK.replace("__SHORT__", short)
+    if not role:
+        return block
+    if not role.get("start_llm", True):
+        head = f"  mini-router-{short}:\n"
+        block = block.replace(head, head + f'    profiles: ["{IDLE_PROFILE}"]\n', 1)
+    if not role.get("board_enabled", True):
+        line = f'      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-${{ORG_NAME}}-{short}.password"\n'
+        block = block.replace(line, line + '      BOARD_IDS: ""\n', 1)
+    return block
+
+
 def build():
+    roles = load_roles()
     # Bootstrap identities, board membership and service names use the same worker list.
     agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
     out = []
     out.append(HEADER)
-    members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
+    board_members = [s for s in ALL_AGENTS if roles.get(s, {}).get("board_enabled", True)]
+    members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in board_members)
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
                .replace("{BOARD_MEMBERS}", members))
     for short in ALL_AGENTS:
-        out.append(AGENT_BLOCK.replace("__SHORT__", short))
+        out.append(agent_block(short, roles.get(short)))
     for short in ALL_AGENTS:
-        out.append(ROUTER_BLOCK.replace("__SHORT__", short))
+        out.append(router_block(short, roles.get(short)))
     return "".join(out)
 
 if __name__ == "__main__":

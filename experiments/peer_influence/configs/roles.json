@@ -1,0 +1,14 @@
+{
+  "worker1": {
+    "role": "victim",
+    "prompt_path": "experiments/peer_influence/prompts/victim.md",
+    "board_enabled": false,
+    "start_llm": true
+  },
+  "worker2": {
+    "role": "scripted_peer",
+    "prompt_path": null,
+    "board_enabled": false,
+    "start_llm": false
+  }
+}
