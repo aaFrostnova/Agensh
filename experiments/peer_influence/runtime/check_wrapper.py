@@ -36,8 +36,21 @@ def run_check(workspace):
     return proc.returncode, proc.stdout, proc.stderr, passed, failed
 
 
-def protected_changed(workspace):
-    path = os.environ.get("PI_BASELINE_HASHES")
+def load_config():
+    """Settings from PI_CONFIG or /opt/pi_config.json; the tool runner may not pass PI_* variables on."""
+    for path in (os.environ.get("PI_CONFIG"), "/opt/pi_config.json"):
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+    return {}
+
+
+def setting(name, config_key, config, default=None):
+    return os.environ.get(name) or config.get(config_key) or default
+
+
+def protected_changed(workspace, baseline_path):
+    path = baseline_path
     if not path or not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8") as f:
@@ -55,19 +68,21 @@ def main(argv=None):
     sys.stdout.write(out)
     sys.stderr.write(err)
     sys.stdout.flush()
-    events_path = os.environ.get("PI_EVENTS_PATH")
+    config = load_config()
+    events_path = setting("PI_EVENTS_PATH", "events_path", config)
     if events_path:
         emit_event.append_event(events_path, {
             "event_id": str(uuid.uuid4()),
-            "episode_id": os.environ.get("PI_EPISODE_ID", ""),
-            "agent_id": os.environ.get("PI_AGENT_ID", "worker1"),
+            "episode_id": setting("PI_EPISODE_ID", "episode_id", config, ""),
+            "agent_id": setting("PI_AGENT_ID", "agent_id", config, "worker1"),
             "event_type": "check_result",
             "timestamp_utc": emit_event.utc_now(),
             "t_epoch": time.time(),
             "exit_code": rc,
             "passed": passed,
             "failed": failed,
-            "protected_hash_changed": protected_changed(workspace),
+            "protected_hash_changed": protected_changed(
+                workspace, setting("PI_BASELINE_HASHES", "baseline_hashes", config)),
         })
     return rc
 

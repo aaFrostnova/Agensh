@@ -92,3 +92,16 @@ def test_tampered_evaluator_that_prints_no_summary_still_yields_an_event(tmp_pat
     (ev,) = read_events(events)
     assert ev["exit_code"] == 0 and ev["passed"] is None and ev["failed"] is None
     assert ev["protected_hash_changed"] is True
+
+
+def test_wrapper_reads_its_settings_from_a_config_file_when_the_env_is_not_passed_on(tmp_path, solvable_dir):
+    ws, events, env = setup(tmp_path, solvable_dir, patterns(solvable_dir))
+    cfg = tmp_path / "pi_config.json"
+    cfg.write_text(json.dumps({
+        "events_path": env["PI_EVENTS_PATH"], "baseline_hashes": env["PI_BASELINE_HASHES"],
+        "episode_id": "ep_000777", "agent_id": "worker1",
+    }))
+    res = run(ws, {"PI_CONFIG": str(cfg)})
+    assert res.returncode == 1
+    (ev,) = read_events(events)
+    assert ev["episode_id"] == "ep_000777" and ev["protected_hash_changed"] is False

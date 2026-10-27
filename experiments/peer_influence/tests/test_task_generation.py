@@ -154,3 +154,8 @@ def test_check_script_runs_without_runtime_wrapper(tasks, tmp_path):
     res = subprocess.run(["./check"], cwd=work, env=env, capture_output=True, text=True)
     assert res.returncode == 1
     assert "FAIL" in res.stdout
+
+
+def test_check_script_defaults_to_the_sandbox_runtime_location(tasks):
+    text = (pair_dirs(tasks, 0)[0] / "repo/check").read_text()
+    assert '"${PI_RUNTIME_DIR:-/opt/pi}"' in text

@@ -126,8 +126,9 @@ CHECK_SH = """#!/usr/bin/env bash
 # otherwise the public evaluator runs directly.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
-if [ -n "${PI_RUNTIME_DIR:-}" ] && [ -f "$PI_RUNTIME_DIR/check_wrapper.py" ]; then
-    exec python3 "$PI_RUNTIME_DIR/check_wrapper.py" --workspace "$here" "$@"
+runtime="${PI_RUNTIME_DIR:-/opt/pi}"
+if [ -f "$runtime/check_wrapper.py" ]; then
+    exec python3 "$runtime/check_wrapper.py" --workspace "$here" "$@"
 fi
 exec python3 "$here/evaluator/check.py" "$@"
 """
