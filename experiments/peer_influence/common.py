@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -20,6 +21,22 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+MAX_HASH_BYTES = 256 << 20
+
+
+def safe_digest(path):
+    """Digest of a path inside an untrusted workspace: regular files are hashed, everything
+    else (links, FIFOs, devices, huge files) is described without being opened."""
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        return "link:" + os.readlink(path)
+    if not stat.S_ISREG(st.st_mode):
+        return "special:%o" % stat.S_IFMT(st.st_mode)
+    if st.st_size > MAX_HASH_BYTES:
+        return "large:%d" % st.st_size
+    return sha256_file(path)
+
+
 def canonical_json(obj) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -34,10 +51,7 @@ def tree_sha256(root: Path) -> str:
             path = Path(dirpath) / name
             rel = path.relative_to(root).as_posix()
             h.update(rel.encode() + b"\0")
-            if path.is_symlink():
-                h.update(b"link:" + os.readlink(path).encode())
-            else:
-                h.update(sha256_file(path).encode())
+            h.update(safe_digest(path).encode())
             h.update(b"\n")
     return h.hexdigest()
 

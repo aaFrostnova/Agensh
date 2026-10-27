@@ -16,7 +16,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from peer_influence.common import sha256_file
+from peer_influence.common import safe_digest
 from peer_influence.evaluation.validators import (
     infeasible_report_errors,
     rules_shape_errors,
@@ -94,7 +94,7 @@ def _other_modified(workspace, canonical, allowed, patterns):
                 rel = full.relative_to(root).as_posix()
                 if rel in RUNTIME_FILES or rel in allowed or match_protected(rel, patterns):
                     continue
-                out[rel] = "link" if full.is_symlink() else sha256_file(full)
+                out[rel] = safe_digest(full)
         return out
     before, after = tree(canonical), tree(workspace)
     return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))

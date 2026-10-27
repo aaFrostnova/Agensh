@@ -8,6 +8,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import stat
 
 SKIP_DIRS = {".git"}
 
@@ -25,9 +26,13 @@ def match_protected(rel, patterns):
 
 
 def _digest(path):
+    """Never opens anything but a regular file: a FIFO or device planted by the agent would block."""
     try:
-        if os.path.islink(path):
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode):
             return "link:" + os.readlink(path)
+        if not stat.S_ISREG(st.st_mode):
+            return "special:%o" % stat.S_IFMT(st.st_mode)
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):
