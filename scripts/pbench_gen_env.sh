@@ -106,7 +106,7 @@ keys = [
     ("PBENCH_LLM_UPSTREAM", os.environ["LLM_UPSTREAM"]),
     ("AGENT_KIND", "copilot"),
     ("COPILOT_PROVIDER_TYPE", "openai"),
-    ("ANTHROPIC_MODEL", "gpt-5.6-sol"),
+    ("ANTHROPIC_MODEL", os.environ.get("AGENT_MODEL") or "gpt-5.6-sol"),
     ("ANTHROPIC_API_KEY", "local-proxy-no-auth"),
     ("UPSTREAM_AUTH_TOKEN", os.environ["LLM_UPSTREAM_TOKEN"]),
     ("PBENCH_WORKERS_PER_TEAM", workers),
@@ -118,7 +118,7 @@ keys = [
     ("PBENCH_SUBNET_EDGE", f"10.{octet}.{sub + units + 1}.0/24"),
     ("COPILOT_PROVIDER_WIRE_API", "responses"),
     ("COPILOT_AGENT_REASONING_EFFORT", os.environ["REASONING_EFFORT"]),
-    ("COPILOT_PROVIDER_MAX_PROMPT_TOKENS", 272000),
+    ("COPILOT_PROVIDER_MAX_PROMPT_TOKENS", int(os.environ.get("COPILOT_PROVIDER_MAX_PROMPT_TOKENS") or 272000)),
     ("UPSTREAM_AUTH_STYLE", "bearer"),
 ]
 for key in ("MINI_ROUTER_IMAGE", "BOARD_IMAGE", "BOOTSTRAP_IMAGE", "SECRET_SERVICE_IMAGE"):

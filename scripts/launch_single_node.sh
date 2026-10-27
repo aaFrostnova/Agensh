@@ -10,6 +10,12 @@ MODE=single-node
 TASKS="${TASKS:-jgm__pandoc.5caad90 gromacs__gromacs.665ea4c universal-ctags__ctags.243595e php__php-src.c891263 ffmpeg__ffmpeg.360a402}"
 HOURS="${HOURS:-6}"
 WORKERS="${WORKERS:-8}"
+# Model expectations default to the recorded release configuration; a selected
+# model route (experiments/peer_influence/routes.py) overrides them.
+EXPECT_MODEL="${PBENCH_EXPECT_MODEL:-gpt-5.6-sol}"
+EXPECT_WIRE_API="${PBENCH_EXPECT_WIRE_API:-responses}"
+EXPECT_EFFORT="${PBENCH_EXPECT_EFFORT:-high}"
+EXPECT_MAX_PROMPT="${PBENCH_EXPECT_MAX_PROMPT_TOKENS:-272000}"
 source "$ROOT/scripts/lib_launch.sh"
 source "$ROOT/scripts/lib_pbench_images.sh"
 mkdir -p "$TRAJ_ROOT" "$ROOT/out"
@@ -43,13 +49,13 @@ for task in $TASKS; do
     k="$(pv "$p" AGENT_KIND)"
     [ "$k" = "copilot" ] || { log "FATAL: .env.$p AGENT_KIND=$k expected copilot"; fail=1; }
     m="$(pv "$p" ANTHROPIC_MODEL)"
-    [ "$m" = "gpt-5.6-sol" ] || { log "FATAL: .env.$p ANTHROPIC_MODEL=$m expected gpt-5.6-sol"; fail=1; }
+    [ "$m" = "$EXPECT_MODEL" ] || { log "FATAL: .env.$p ANTHROPIC_MODEL=$m expected $EXPECT_MODEL"; fail=1; }
     w="$(pv "$p" COPILOT_PROVIDER_WIRE_API)"
-    [ "$w" = "responses" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_WIRE_API='$w' expected responses"; fail=1; }
+    [ "$w" = "$EXPECT_WIRE_API" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_WIRE_API='$w' expected $EXPECT_WIRE_API"; fail=1; }
     r="$(pv "$p" COPILOT_AGENT_REASONING_EFFORT)"
-    [ "$r" = "high" ] || { log "FATAL: .env.$p COPILOT_AGENT_REASONING_EFFORT='$r' expected high"; fail=1; }
+    [ "$r" = "$EXPECT_EFFORT" ] || { log "FATAL: .env.$p COPILOT_AGENT_REASONING_EFFORT='$r' expected $EXPECT_EFFORT"; fail=1; }
     m="$(pv "$p" COPILOT_PROVIDER_MAX_PROMPT_TOKENS)"
-    [ "$m" = "272000" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_MAX_PROMPT_TOKENS='$m' expected 272000"; fail=1; }
+    [ "$m" = "$EXPECT_MAX_PROMPT" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_MAX_PROMPT_TOKENS='$m' expected $EXPECT_MAX_PROMPT"; fail=1; }
 
     gw="$(pv "$p" PBENCH_WORKERS_PER_TEAM)"
     [ "$gw" = "$WORKERS" ] || { log "FATAL: .env.$p PBENCH_WORKERS_PER_TEAM=$gw expected $WORKERS"; fail=1; }

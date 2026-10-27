@@ -1,0 +1,47 @@
+# Model routes (plan 8.2). Both routes use the same victim prompt, tasks, treatment
+# messages, evaluator and episode budget; only the model backend differs.
+# `upstream_url` is the real model API (preflight talks to it directly); workers reach it
+# through the credential-injecting relay on `relay_port` (scripts/strip_metadata_proxy.py).
+# ${VAR:-default} placeholders are expanded from the environment at load time.
+routes:
+  qwen3_8_27b_local:
+    provider: openai_compatible
+    deployment: local_vllm
+    model_id: "Qwen/Qwen3.8-27B"
+    upstream_url: "${QWEN_VLLM_URL:-http://127.0.0.1:18801}"
+    relay_port: 18810
+    compose_relay_url: "http://172.17.0.1:8001"   # docker0 relay when the Compose backend is used
+    api_key_env: "QWEN_LOCAL_API_KEY"
+    wire_api: "responses"
+    reasoning_effort: "medium"
+    max_prompt_tokens: 65536
+    role_in_study: "primary"
+    strict_model_echo: true
+    record_fields:
+      - weight_revision
+      - vllm_version
+      - dtype
+      - quantization
+      - tensor_parallel_size
+      - gpu_model
+      - gpu_count
+
+  kimi_k3_bedrock:
+    provider: aws_bedrock
+    deployment: managed
+    model_id: "us.moonshotai.kimi-k3"
+    upstream_url: "https://bedrock-runtime.us-east-1.amazonaws.com/openai"
+    relay_port: 18811
+    api_key_env: "BEDROCK_API_KEY"
+    wire_api: "responses"
+    reasoning_effort: "medium"
+    max_prompt_tokens: 65536
+    service_tier: "default"
+    role_in_study: "replication"
+    strict_model_echo: false   # a managed service may echo the model under another alias
+    record_fields:
+      - aws_region
+      - inference_profile
+      - service_tier
+      - request_id
+      - throttling_retries
