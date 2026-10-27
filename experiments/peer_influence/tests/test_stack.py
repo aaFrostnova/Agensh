@@ -33,7 +33,7 @@ def test_worker_environment_matches_the_route_and_disables_only_the_board_tool(t
     env = worker_environment(spec(tmp_path))
     assert env["ANTHROPIC_MODEL"] == "Qwen/Qwen3.8-27B"
     assert env["COPILOT_AGENT_REASONING_EFFORT"] == "medium" and env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] == "65536"
-    assert env["COPILOT_PROVIDER_WIRE_API"] == "responses" and env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18810"
+    assert env["COPILOT_PROVIDER_WIRE_API"] == "responses" and env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:18810/v1"
     assert env["EXPERIMENT_DISABLE_BOARD"] == "1" and env["BOARD_IDS"] == ""
     assert env["BOARD_SERVICE_URL"] == "http://127.0.0.1:18660"  # the notice shim still polls it for DMs
     assert env["ACP_CHILD_UID"] == "10000" and env["ACP_CHILD_GID"] == "10000"
@@ -93,3 +93,56 @@ def test_the_command_runs_the_unmodified_entrypoint(tmp_path):
 def test_free_port_returns_distinct_bindable_ports():
     a, b = free_port(), free_port()
     assert a != b and 1024 < a < 65536
+
+
+def test_find_descendant_locates_a_nested_process_by_command_line():
+    import os
+    import signal
+    import subprocess
+    import time
+
+    from peer_influence.stack import find_descendant
+
+    proc = subprocess.Popen(["bash", "-c", "bash -c 'exec sleep 31' & wait"], start_new_session=True)
+    try:
+        for _ in range(40):
+            pid = find_descendant(proc.pid, "sleep 31")
+            if pid:
+                break
+            time.sleep(0.1)
+        assert pid and pid != proc.pid
+        assert find_descendant(proc.pid, "no-such-command") is None
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
+def test_bridge_patch_protects_the_bridge_its_parent_and_init():
+    from peer_influence.stack import patched_bridge
+
+    upstream = (Path(__file__).resolve().parents[3] / "agent" / "acp-bridge.py").read_text()
+    patched = patched_bridge(upstream)
+    compile(patched, "acp-bridge.py", "exec")
+    sweep = [l for l in patched.splitlines() if "int(uid) == child_uid" in l]
+    assert len(sweep) == 1 and "os.getpid()" in sweep[0] and "os.getppid()" in sweep[0]
+    with pytest.raises(ValueError):
+        patched_bridge("print('some other bridge')")
+
+
+def test_worker_runs_the_patched_bridge_not_the_upstream_one(tmp_path):
+    s = spec(tmp_path)
+    ro = dict((dest, src) for src, dest in value_after(worker_bwrap_command(s), "--ro-bind"))
+    assert ro["/opt/omcgitea/acp-bridge.py"] == str(s.live / "acp-bridge.py")
+
+
+def test_written_bridge_is_executable_and_keeps_its_shebang(tmp_path):
+    import os
+
+    from peer_influence.stack import write_patched_bridge
+
+    repo = Path(__file__).resolve().parents[3]
+    live = tmp_path / "live"
+    live.mkdir()
+    path = write_patched_bridge(repo, live)
+    assert path == live / "acp-bridge.py" and os.access(path, os.X_OK)
+    assert path.read_text().startswith("#!/usr/bin/env python3")

@@ -25,3 +25,20 @@ def plan_matrix(task_pairs, repeats, route, experiment_id, seed):
             experiment_id=experiment_id, model_route=route, run_attempt=1,
         )
     return cells
+
+
+def treatment_type(peer_condition):
+    """Experiment condition -> controller treatment: `solo` is the no-message arm."""
+    if peer_condition not in PEERS:
+        raise ValueError(f"unknown peer condition {peer_condition!r}")
+    return "none" if peer_condition == "solo" else peer_condition
+
+
+def filter_plan(plan, peers=None, limit=None, skip=()):
+    """Subset of a plan in its original run order; an explicit, visible way to run part of a cohort."""
+    if peers is not None:
+        unknown = set(peers) - set(PEERS)
+        if unknown:
+            raise ValueError(f"unknown peer conditions {sorted(unknown)}")
+    chosen = [s for s in plan if (peers is None or s["peer_condition"] in peers) and s["episode_id"] not in set(skip)]
+    return chosen if limit is None else chosen[:limit]

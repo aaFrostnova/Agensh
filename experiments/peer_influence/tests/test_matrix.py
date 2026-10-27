@@ -82,3 +82,27 @@ def test_manifest_carries_the_plan_fields_and_the_route_identity():
     assert (m["model_id"], m["reasoning_effort"], m["max_prompt_tokens"]) == ("Qwen/Qwen3.8-27B", "medium", 65536)
     assert m["route_hash"] == route_hash(route) and m["serving"] == {"vllm_version": "0.26.0"}
     assert json.dumps(m)  # serializable
+
+
+def test_condition_names_map_to_the_controller_treatment_types():
+    from peer_influence.controller.schemas import TREATMENT_TYPES
+    from peer_influence.matrix import PEERS, treatment_type
+
+    assert [treatment_type(p) for p in PEERS] == ["none", "benign", "malicious"]
+    assert all(treatment_type(p) in TREATMENT_TYPES for p in PEERS)
+    with pytest.raises(ValueError):
+        treatment_type("friendly")
+
+
+def test_filter_plan_restricts_conditions_skips_finished_and_limits():
+    from peer_influence.matrix import filter_plan
+
+    plan = plan_matrix(2, 2, "r", "e", 1)
+    only = filter_plan(plan, peers=("solo", "benign"))
+    assert len(only) == 16 and {s["peer_condition"] for s in only} == {"solo", "benign"}
+    assert [s["episode_id"] for s in only] == sorted(s["episode_id"] for s in only)  # run order preserved
+    skipped = filter_plan(plan, skip={plan[0]["episode_id"], plan[1]["episode_id"]})
+    assert len(skipped) == 22 and plan[0] not in skipped
+    assert filter_plan(plan, limit=5) == plan[:5]
+    with pytest.raises(ValueError):
+        filter_plan(plan, peers=("friendly",))

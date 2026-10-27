@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -29,6 +30,57 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def find_descendant(root_pid, needle):
+    """Pid of a descendant of root_pid whose command line contains `needle` (scans /proc)."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = Path(f"/proc/{entry}/stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    queue = list(children.get(root_pid, []))
+    while queue:
+        pid = queue.pop(0)
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            cmdline = ""
+        if needle in cmdline:
+            return pid
+        queue.extend(children.get(pid, []))
+    return None
+
+
+_SWEEP = "if int(uid) == child_uid:"
+_SWEEP_PROTECTED = ("if int(uid) == child_uid and int(path.parent.name) not in "
+                    "(os.getpid(), os.getppid(), 1):")
+
+
+def patched_bridge(source):
+    """acp-bridge.py for a sandbox where the bridge and the agent share one uid.
+
+    The stock shutdown sweep signals every process owned by the child uid. In the Compose
+    container the bridge is root, so it survives; here it would SIGKILL itself (and its
+    parent) before sealing the archive. The patch exempts the bridge, its parent and init.
+    """
+    if source.count(_SWEEP) != 1:
+        raise ValueError("acp-bridge.py no longer has the expected shutdown sweep; re-check the patch")
+    return source.replace(_SWEEP, _SWEEP_PROTECTED)
+
+
+def write_patched_bridge(repo_root, live):
+    """Write the sandbox copy of acp-bridge.py (executable: the entrypoint runs it directly)."""
+    path = Path(live) / "acp-bridge.py"
+    path.write_text(patched_bridge((Path(repo_root) / "agent" / "acp-bridge.py").read_text(encoding="utf-8")),
+                    encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 @dataclass
@@ -58,7 +110,7 @@ def worker_environment(spec):
         "AGENT_KIND": "copilot", "AGENT_NAME": spec.agent_name, "GITEA_ORG": spec.org,
         "GITEA_HOST": spec.gitea_url, "GITEA_TOKEN_FILE": "/run/omcgitea/tokens/agent.token",
         "MATTERMOST_HOST": spec.mattermost_url, "MATTERMOST_TOKEN_FILE": "/run/omcgitea/tokens/mm.token",
-        "ANTHROPIC_BASE_URL": spec.relay_url, "ANTHROPIC_API_KEY": "local-proxy-no-auth",
+        "ANTHROPIC_BASE_URL": spec.relay_url.rstrip("/") + "/v1", "ANTHROPIC_API_KEY": "local-proxy-no-auth",
         "ANTHROPIC_MODEL": spec.route.model_id, "COPILOT_PROVIDER_TYPE": "openai",
         "COPILOT_PROVIDER_WIRE_API": spec.route.wire_api,
         "COPILOT_AGENT_REASONING_EFFORT": spec.route.reasoning_effort,
@@ -82,7 +134,7 @@ def worker_bwrap_command(spec):
         (str(live / "pi_config.json"), "/opt/pi_config.json"),
         (str(live / "protected_hashes_before.json"), "/opt/pi_baseline.json"),
         (str(repo / "agent/entrypoint.sh"), "/opt/omcgitea/entrypoint.sh"),
-        (str(repo / "agent/acp-bridge.py"), "/opt/omcgitea/acp-bridge.py"),
+        (str(live / "acp-bridge.py"), "/opt/omcgitea/acp-bridge.py"),
         (str(repo / "agent/archive.py"), "/opt/omcgitea/archive.py"),
         (str(repo / "agent/config/copilot-deny-tools.json"), "/opt/omcgitea/config/copilot-deny-tools.json"),
         (str(repo / "agent/config/mcp.json.tmpl"), "/opt/omcgitea/config/mcp.json.tmpl"),
@@ -350,6 +402,7 @@ LEVEL = Warn
         self._spawn("mini-router", [self.paths.node, "dist/main.js"], cwd=self.paths.repo_root / "mini-router", env=env)
 
     def start_worker(self, spec):
+        write_patched_bridge(self.paths.repo_root, self.live)
         self._spawn("worker", worker_bwrap_command(spec), env={"PATH": os.environ["PATH"]})
         self._wait("worker", lambda: (self.live / "acp/agent.sock").exists(), timeout=90)
 
@@ -381,6 +434,62 @@ LEVEL = Warn
     def shown_events(self):
         out = self.mysql_exec("SELECT event_id, agent FROM shown;", "omcgitea")
         return [dict(zip(("event_id", "agent"), r.split("\t"))) for r in out.splitlines()[1:]]
+
+    def relay_stats(self):
+        path = self.live / "logs" / "relay.log"
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        ok = err = 0
+        for m in re.finditer(r"\] \w+ (\S+) .*?-> (\d{3}|BAD)", text):
+            if m.group(1).endswith("/responses"):
+                ok, err = (ok + 1, err) if m.group(2) == "200" else (ok, err + 1)
+        return {"responses_ok": ok, "responses_error": err}
+
+    def dm_posts(self, channel_id):
+        token = self.mm_login("mmadmin", self.pw["mm"])
+        h = {"Authorization": f"Bearer {token}"}
+        page = requests.get(self.url("mm") + f"/api/v4/channels/{channel_id}/posts?per_page=100", headers=h, timeout=15).json()
+        names = {}
+        out = []
+        for pid in reversed(page.get("order", [])):
+            p = page["posts"][pid]
+            uid = p["user_id"]
+            if uid not in names:
+                names[uid] = requests.get(self.url("mm") + f"/api/v4/users/{uid}", headers=h, timeout=15).json()["username"]
+            out.append({"id": pid, "user": names[uid], "message": p["message"], "create_at": p["create_at"],
+                        "props": p.get("props") or {}})
+        return {"channel_id": channel_id, "posts": out}
+
+    def stop_worker(self, timeout=90):
+        """Let the entrypoint run its shutdown path (cancel tools, seal the HOME/workspace archive).
+
+        SIGTERM goes to the entrypoint inside the sandbox, not to bubblewrap: bubblewrap
+        dying would SIGKILL the whole PID namespace before the archive is written."""
+        for name, proc in self.procs:
+            if name == "worker" and proc.poll() is None:
+                inner = find_descendant(proc.pid, "/opt/omcgitea/entrypoint.sh")
+                if inner:
+                    os.kill(inner, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        pass
+        return self.stop_proc("worker", timeout=10)
+
+    def stop_proc(self, name, timeout=90):
+        """Graceful stop of one service (SIGTERM, then SIGKILL); returns its exit code."""
+        for n, proc in self.procs:
+            if n != name or proc.poll() is not None:
+                continue
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        return next((p.returncode for n, p in self.procs if n == name), None)
 
     def stop_all(self):
         for name, proc in reversed(self.procs):
