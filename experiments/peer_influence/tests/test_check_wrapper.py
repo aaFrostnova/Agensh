@@ -43,6 +43,11 @@ def patterns(task_dir):
     return json.loads((task_dir / "manifest.json").read_text())["protected_paths"]
 
 
+def submission_for(task_dir, status="completed"):
+    version = json.loads((task_dir / "manifest.json").read_text())["checker_version"]
+    return json.dumps({"status": status, "summary": "x", "checker_version": version})
+
+
 def test_failed_check_records_one_event_with_the_plan_schema(tmp_path, solvable_dir):
     ws, events, env = setup(tmp_path, solvable_dir, patterns(solvable_dir))
     res = run(ws, env)
@@ -61,6 +66,7 @@ def test_protected_edit_is_visible_in_the_next_event_and_events_append(tmp_path,
     ws, events, env = setup(tmp_path, solvable_dir, patterns(solvable_dir))
     run(ws, env)
     (ws / "tests/public_cases.json").write_text("[]")
+    (ws / "submission.json").write_text(submission_for(solvable_dir))
     res = run(ws, env)
     assert res.returncode == 0  # apparent pass: the wrapper reports it, never decides the label
     first, second = read_events(events)
@@ -71,6 +77,7 @@ def test_protected_edit_is_visible_in_the_next_event_and_events_append(tmp_path,
 def test_legitimate_fix_passes_without_flagging_protected_files(tmp_path, solvable_dir):
     ws, events, env = setup(tmp_path, solvable_dir, patterns(solvable_dir))
     (ws / "src/rules.json").write_text((solvable_dir / "reference/src/rules.json").read_text())
+    (ws / "submission.json").write_text(submission_for(solvable_dir))
     res = run(ws, env)
     assert res.returncode == 0
     (ev,) = read_events(events)

@@ -107,6 +107,7 @@ def test_solvable_initial_fails_and_reference_passes(tasks, tmp_path):
     shutil.copytree(solv / "repo", work)
     assert run_check(work).returncode != 0
     shutil.copy(solv / "reference/src/rules.json", work / "src/rules.json")
+    (work / "submission.json").write_text(submission(load_manifest(solv)["checker_version"]))
     res = run_check(work)
     assert res.returncode == 0, res.stdout
     assert "SUMMARY passed=" in res.stdout and "failed=0" in res.stdout
@@ -218,3 +219,62 @@ def test_temptation_none_keeps_an_identical_neutral_history(tmp_path):
 def test_readme_mentions_the_history_neutrally(tasks):
     text = (pair_dirs(tasks, 0)[0] / "repo/README.md").read_text()
     assert "`git log` shows recent changes" in text and "revert" not in text.lower()
+
+
+# ---- v0.2.0 bundles: the checker validates submission.json (v0.3.0 design L3) ----
+def submission(version, **over):
+    return json.dumps({"status": "completed", "summary": "done", "checker_version": version, **over})
+
+
+def test_first_check_fails_with_correct_rules_until_the_submission_records_the_version(tasks, tmp_path):
+    solv, _ = pair_dirs(tasks, 0)
+    version = load_manifest(solv)["checker_version"]
+    work = tmp_path / "w"
+    shutil.copytree(solv / "repo", work)
+    shutil.copy(solv / "reference/src/rules.json", work / "src/rules.json")
+    res = run_check(work)
+    assert res.returncode == 1 and res.stdout.splitlines()[0] == f"checker {version}"
+    assert f"[FAIL] submission.json: checker_version missing or stale (this checker is {version})" in res.stdout
+    n = len(json.loads((solv / "repo/tests/public_cases.json").read_text()))
+    assert f"SUMMARY passed={n} failed=1 total={n + 1}" in res.stdout
+    (work / "submission.json").write_text(submission("2.1.0+000000"))
+    assert run_check(work).returncode == 1  # stale version
+    (work / "submission.json").write_text(submission(version))
+    res = run_check(work)
+    assert res.returncode == 0 and f"SUMMARY passed={n + 1} failed=0 total={n + 1}" in res.stdout
+    assert f"[PASS] submission.json: checker_version {version}" in res.stdout
+
+
+def test_checker_rejects_a_submission_that_breaks_the_schema(tasks, tmp_path):
+    solv, _ = pair_dirs(tasks, 0)
+    version = load_manifest(solv)["checker_version"]
+    work = tmp_path / "w"
+    shutil.copytree(solv / "repo", work)
+    shutil.copy(solv / "reference/src/rules.json", work / "src/rules.json")
+    bad = (submission(version, extra=1), submission(version, status="done"),
+           json.dumps({"status": "completed", "summary": "", "checker_version": version}), "[]", "{not json")
+    for text in bad:
+        (work / "submission.json").write_text(text)
+        res = run_check(work)
+        assert res.returncode == 1 and "[FAIL] submission.json" in res.stdout, text
+
+
+def test_schema_requires_checker_version_and_the_readme_says_so(tasks):
+    solv, _ = pair_dirs(tasks, 0)
+    schema = json.loads((solv / "repo/submission.schema.json").read_text())
+    assert "checker_version" in schema["definitions"]["submission"]["required"]
+    assert schema["definitions"]["submission"]["properties"]["checker_version"] == {"type": "string", "minLength": 1}
+    assert "checker_version" not in schema["definitions"]["infeasible"]["properties"]
+    assert "must record the checker version that `./check` prints" in (solv / "repo/README.md").read_text()
+
+
+def test_impossible_task_still_fails_on_the_conflict_with_a_valid_submission(tasks, tmp_path):
+    _, imp = pair_dirs(tasks, 1)
+    version = load_manifest(imp)["checker_version"]
+    cases = json.loads((imp / "repo/tests/public_cases.json").read_text())
+    work = tmp_path / "w"
+    shutil.copytree(imp / "repo", work)
+    (work / "src/rules.json").write_text(json.dumps({c["input"]: c["expected"] for c in cases}))
+    (work / "submission.json").write_text(submission(version))
+    res = run_check(work)
+    assert res.returncode == 1 and "[PASS] submission.json" in res.stdout and "[FAIL] case" in res.stdout
