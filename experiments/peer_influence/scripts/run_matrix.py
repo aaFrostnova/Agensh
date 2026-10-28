@@ -31,10 +31,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--model-route", required=True)
+    ap.add_argument("--adversary-route", help="autonomous peer route; defaults to config or victim route")
     ap.add_argument("--task-pairs", type=int, required=True)
     ap.add_argument("--repeats", type=int, required=True)
     ap.add_argument("--seed", type=int, default=20261027, help="cohort shuffle seed")
-    ap.add_argument("--peers", default=",".join(PEERS), help="comma list; a subset makes the cohort partial and says so")
+    ap.add_argument("--peers", default=None, help="comma list; a subset makes the cohort partial and says so")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--parallel", type=int, default=1, help="episodes at once; independent stacks, same global design")
     ap.add_argument("--resume", action="store_true",
@@ -50,16 +51,21 @@ def main(argv=None):
     ctx = build_context(args, cfg, project_root())
     if not ctx.preflight["ok"]:
         sys.exit("FATAL: route preflight failed; refusing to run the cohort (fail closed)")
-    peers = tuple(p for p in args.peers.split(",") if p)
-    plan = filter_plan(plan_matrix(args.task_pairs, args.repeats, args.model_route, ctx.experiment_id, args.seed), peers=peers)
+    peers = tuple(p for p in (args.peers or ",".join(cfg["conditions"]["peer"])).split(",") if p)
+    plan = filter_plan(plan_matrix(args.task_pairs, args.repeats, args.model_route, ctx.experiment_id, args.seed,
+                                   family=cfg["tasks"].get("family", "mapping")), peers=peers)
     if set(peers) != set(PEERS):
         print(f"NOTE: partial cohort, peer conditions {peers} only", flush=True)
     for peer in peers:
         try:
-            load_treatment_message(ctx.prompts_dir, peer)
+            if ctx.peer_mode == "autonomous" and peer == "malicious":
+                if not (ctx.prompts_dir / "peer_adversary.md").read_text().strip():
+                    raise MissingTreatmentMessage("autonomous adversary prompt is missing or empty")
+            else:
+                load_treatment_message(ctx.prompts_dir, peer)
         except MissingTreatmentMessage as exc:
             sys.exit(f"FATAL: {exc}")
-    if {"benign", "malicious"} <= set(peers):
+    if ctx.peer_mode != "autonomous" and {"benign", "malicious"} <= set(peers):
         problems = treatment_pair_problems(load_treatment_message(ctx.prompts_dir, "benign")[0],
                                            load_treatment_message(ctx.prompts_dir, "malicious")[0])
         if problems:

@@ -54,7 +54,8 @@ def prompt_hashes(prompts_dir):
     prompts_dir = Path(prompts_dir)
     out = {}
     for key, name in (("victim_prompt_sha256", "victim.md"), ("task_brief_sha256", "task_brief.md"),
-                      ("peer_benign_sha256", "peer_benign.txt"), ("peer_malicious_sha256", "peer_malicious.txt")):
+                      ("peer_benign_sha256", "peer_benign.txt"), ("peer_malicious_sha256", "peer_malicious.txt"),
+                      ("peer_adversary_sha256", "peer_adversary.md")):
         path = prompts_dir / name
         if path.is_file():
             out[key] = sha256_bytes(path.read_bytes())

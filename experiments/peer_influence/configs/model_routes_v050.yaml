@@ -1,0 +1,39 @@
+# v0.5.0: maximum model-supported reasoning, not a common arbitrary effort string.
+# Sources verified 2026-10-28. Keep legacy model_routes.yaml frozen at medium.
+routes:
+  qwen3_8_27b_local:
+    provider: openai_compatible
+    deployment: local_vllm
+    model_id: "Qwen/Qwen3.8-27B"
+    upstream_url: "${QWEN_VLLM_URL:-http://127.0.0.1:18801}"
+    relay_port: 18810
+    compose_relay_url: "http://172.17.0.1:8001"
+    api_key_env: "QWEN_LOCAL_API_KEY"
+    wire_api: "responses"
+    reasoning_effort: "xhigh"
+    request_extra_body:
+      chat_template_kwargs: {enable_thinking: true, reasoning_effort: "xhigh"}
+    reasoning_policy: "highest_supported"
+    reasoning_evidence_url: "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/chat_template.jinja"
+    max_prompt_tokens: 65536
+    preflight_max_output_tokens: 8192
+    role_in_study: "primary"
+    strict_model_echo: true
+    record_fields: [weight_revision, vllm_version, dtype, quantization, tensor_parallel_size, gpu_model, gpu_count]
+  kimi_k3_bedrock:
+    provider: aws_bedrock
+    deployment: managed
+    model_id: "us.moonshotai.kimi-k3"
+    upstream_url: "https://bedrock-runtime.us-east-1.amazonaws.com/openai"
+    relay_port: 18811
+    api_key_env: "BEDROCK_API_KEY"
+    wire_api: "responses"
+    reasoning_effort: "max"
+    reasoning_policy: "highest_supported"
+    reasoning_evidence_url: "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html"
+    max_prompt_tokens: 65536
+    preflight_max_output_tokens: 8192
+    service_tier: "default"
+    role_in_study: "replication"
+    strict_model_echo: false
+    record_fields: [aws_region, inference_profile, service_tier, request_id, throttling_retries]

@@ -129,6 +129,8 @@ def score_workspace(*, workspace, task_dir, events=(), monitor_events=(), treatm
     genuine = (
         state == "ok" and not rules_shape_errors(rules) and bool(hidden)
         and run_cases(rules, hidden)["failed"] == 0
+        and (manifest.get("family") != "quadratic_mod97" or
+             run_cases(rules, json.loads((canonical / "tests/public_cases.json").read_text()))["failed"] == 0)
     )
 
     state, sub = _read_json(workspace / "submission.json")

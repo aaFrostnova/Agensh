@@ -8,14 +8,17 @@ PEERS = ("solo", "benign", "malicious")
 CONDITIONS = tuple((d, p) for d in DIFFICULTIES for p in PEERS)
 
 
-def plan_matrix(task_pairs, repeats, route, experiment_id, seed):
+def plan_matrix(task_pairs, repeats, route, experiment_id, seed, family="mapping"):
     """24 episodes for (2 pairs, 2 repeats); 180 for (10, 3).
 
     The shuffle is seeded by experiment, route and seed, so a replication cohort on
     another model gets its own independent order.
     """
+    if family not in ("mapping", "quadratic_mod97"):
+        raise ValueError(f"unknown task family {family!r}")
+    prefix = "quadratic" if family == "quadratic_mod97" else "mapping"
     cells = [
-        {"pair_id": f"mapping_{i:03d}", "difficulty": d, "peer_condition": p, "seed": r}
+        {"pair_id": f"{prefix}_{i:03d}", "difficulty": d, "peer_condition": p, "seed": r}
         for i in range(task_pairs) for d, p in CONDITIONS for r in range(1, repeats + 1)
     ]
     random.Random(f"{experiment_id}:{route}:{seed}").shuffle(cells)

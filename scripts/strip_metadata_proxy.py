@@ -1,36 +1,69 @@
 #!/usr/bin/env python3
-# Relay model HTTP requests, removing unsupported metadata/Responses reasoning data.
-# Optionally inject the upstream credential; buffer complete responses and retry
-# selected transient failures before returning the upstream status and body.
+"""Credential-injecting relay with optional host-enforced actor usage accounting.
 
-import json, os, sys, time, http.server, urllib.request, urllib.error
+Set USAGE_LOG_PATH and USAGE_ACTOR_TOKENS_JSON (agent_id -> unique local API key)
+for audited requests. These keys are never sent upstream or written to the ledger.
+"""
+import hmac
+import http.client
+import http.server
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
+from peer_influence.usage import append_event, extract_usage
 
 UPSTREAM = os.environ.get("UPSTREAM", "").strip()
-if not UPSTREAM:
-    sys.exit("FATAL: UPSTREAM is not set (the LLM endpoint to forward to)")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "4180"))
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "127.0.0.1")
 UPSTREAM_AUTH_TOKEN = os.environ.get("UPSTREAM_AUTH_TOKEN", "").strip()
 UPSTREAM_AUTH_STYLE = os.environ.get("UPSTREAM_AUTH_STYLE", "bearer").strip().lower()
+USAGE_LOG_PATH = os.environ.get("USAGE_LOG_PATH", "")
+ACTOR_TOKENS = json.loads(os.environ.get("USAGE_ACTOR_TOKENS_JSON", "{}"))
+EXPECTED_MODEL = os.environ.get("UPSTREAM_MODEL", "")
+EXPECTED_EFFORT = os.environ.get("UPSTREAM_REASONING_EFFORT", "")
+EXTRA_BODY = json.loads(os.environ.get("UPSTREAM_EXTRA_BODY_JSON", "{}"))
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer",
               "transfer-encoding", "upgrade", "content-length"}
 
 
-def _timed_out(e):
-    r = e.reason if isinstance(e, urllib.error.URLError) else e
-    return isinstance(r, TimeoutError)
+def _timed_out(exc):
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(reason, TimeoutError)
+
+
+def _actor(headers):
+    auth = headers.get("Authorization", "")
+    key = auth[7:] if auth.startswith("Bearer ") else headers.get("api-key", headers.get("x-api-key", ""))
+    for actor, expected in ACTOR_TOKENS.items():
+        if hmac.compare_digest(key, expected):
+            return actor
+    return None
+
+
+def _read_response(resp):
+    try:
+        return resp.read(), True, None
+    except http.client.IncompleteRead as exc:
+        return exc.partial, False, type(exc).__name__
+    except Exception as exc:
+        return b"", False, type(exc).__name__
+    finally:
+        resp.close()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):    self._proxy()
-    def do_GET(self):     self._proxy()
-    def log_message(self, fmt, *args):
-        pass
+    def do_POST(self): self._proxy()
+    def do_GET(self): self._proxy()
+    def log_message(self, *_args): pass
 
     def _proxy(self):
-        src_ip = self.client_address[0] if self.client_address else "?"
-        src_port = self.client_address[1] if self.client_address else 0
-        rid = f"{src_ip}:{src_port}#{id(self) & 0xffff:04x}"
         if self.path == "/healthz":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -38,148 +71,144 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok\n")
             return
-        te = self.headers.get("Transfer-Encoding", "").lower()
-        length = int(self.headers.get("Content-Length", "0"))
-        ua = self.headers.get("User-Agent", "")[:60]
-        if "chunked" in te:
-            # Decode incoming chunks before forwarding a fixed Content-Length body.
-            chunks = []
-            while True:
-                line = self.rfile.readline().strip()
-                if not line: break
-                try:
-                    n = int(line.split(b";",1)[0], 16)
-                except Exception:
-                    break
-                if n == 0:
-                    while self.rfile.readline().strip():
-                        pass
-                    break
-                chunks.append(self.rfile.read(n))
-                self.rfile.readline()
-            body = b"".join(chunks)
-        else:
-            body = self.rfile.read(length) if length else b""
-        ct = self.headers.get("Content-Type", "")
-        if body and "json" in ct.lower():
+        agent_id = _actor(self.headers)
+        if ACTOR_TOKENS and agent_id is None:
+            self.send_error(401, "Unknown local actor credential")
+            return
+        rid = str(uuid.uuid4())
+        context = {"request_id": rid, "agent_id": agent_id or "unattributed",
+                   "episode_id": os.environ.get("USAGE_EPISODE_ID", "unknown"),
+                   "cohort_id": os.environ.get("USAGE_COHORT_ID", "unknown")}
+        def record(event, **fields):
+            append_event(USAGE_LOG_PATH, {**context, "event": event, **fields})
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+                chunks = []
+                while True:
+                    n = int(self.rfile.readline().strip().split(b";", 1)[0], 16)
+                    if n == 0:
+                        while self.rfile.readline().strip(): pass
+                        break
+                    chunks.append(self.rfile.read(n))
+                    self.rfile.readline()
+                body = b"".join(chunks)
+            else:
+                body = self.rfile.read(length) if length else b""
+        except (ValueError, OSError):
+            self.send_error(400, "Invalid request framing")
+            return
+        model, effort = None, None
+        if body and "json" in self.headers.get("Content-Type", "").lower():
             try:
-                d = json.loads(body)
-                mutated = False
-                if isinstance(d, dict):
-                    if "metadata" in d:
-                        d.pop("metadata", None)
-                        mutated = True
+                data = json.loads(body)
+                if isinstance(data, dict):
+                    data.pop("metadata", None)
                     if "/responses" in self.path:
-                        # Drop reasoning replay items and encrypted-content includes.
-                        inc = d.get("include")
+                        inc = data.get("include")
                         if isinstance(inc, list):
                             keep = [x for x in inc if "encrypted_content" not in str(x)]
-                            if len(keep) != len(inc):
-                                if keep:
-                                    d["include"] = keep
-                                else:
-                                    d.pop("include", None)
-                                mutated = True
-                        items = d.get("input")
+                            if keep: data["include"] = keep
+                            else: data.pop("include", None)
+                        items = data.get("input")
                         if isinstance(items, list):
-                            keep = [it for it in items
-                                    if not (isinstance(it, dict) and it.get("type") == "reasoning")]
-                            if len(keep) != len(items):
-                                d["input"] = keep
-                                mutated = True
-                if mutated:
-                    body = json.dumps(d).encode()
-            except Exception as e:
-                print(f"[proxy {rid}] json parse skip: {e}", flush=True)
-
-        url = UPSTREAM.rstrip("/") + self.path
-        out_headers = {k: v for k, v in self.headers.items()
-                       if k.lower() not in HOP_BY_HOP and k.lower() != "host"}
-        out_headers["Content-Length"] = str(len(body))
-        if UPSTREAM_AUTH_TOKEN:
-            # Replace the worker's local credential only when injection is configured.
-            out_headers = {k: v for k, v in out_headers.items()
-                           if k.lower() not in ("authorization", "x-api-key", "api-key")}
-            if UPSTREAM_AUTH_STYLE == "api-key":
-                out_headers["api-key"] = UPSTREAM_AUTH_TOKEN
-            else:
-                out_headers["Authorization"] = f"Bearer {UPSTREAM_AUTH_TOKEN}"
-
-        req = urllib.request.Request(url, data=body, headers=out_headers, method=self.command)
-
-        _attempts = int(os.environ.get("UPSTREAM_RETRY_ATTEMPTS", "4"))
-        _backoff = [0, 2, 5, 12]
-        resp_headers = []
-        err = None
-        for _try in range(_attempts):
-            try:
-                resp = urllib.request.urlopen(req, timeout=600)
-            except urllib.error.HTTPError as e:
-                status = e.code
-                try:
-                    resp_body = e.read() or b""
-                    resp_headers = e.headers.items()
-                except Exception as read_err:
-                    try:
-                        e.close()
-                    except Exception:
-                        pass
-                    err = read_err
-                    break
-                if status in (429, 500, 502, 503, 504) and _try < _attempts - 1:
-                    _d = _backoff[min(_try, len(_backoff) - 1)] or 1
-                    print(f"[proxy {rid}] upstream {status}, retry {_try+1}/{_attempts-1} in {_d}s", flush=True)
-                    time.sleep(_d)
-                    req = urllib.request.Request(url, data=body, headers=out_headers, method=self.command)
-                    continue
-                break
-            except Exception as e:
-                # Do not retry timeouts: the upstream may still be running inference.
-                if not _timed_out(e) and _try < _attempts - 1:
-                    _d = _backoff[min(_try, len(_backoff) - 1)] or 1
-                    print(f"[proxy {rid}] upstream error {e}, retry {_try+1}/{_attempts-1} in {_d}s", flush=True)
-                    time.sleep(_d)
-                    req = urllib.request.Request(url, data=body, headers=out_headers, method=self.command)
-                    continue
-                err = e
-                break
-            try:
-                status = resp.status
-                resp_body = resp.read()
-                resp_headers = resp.getheaders()
-            except Exception as e:
-                resp.close()
-                err = e
-            break
-        if err is not None:
-            self.send_error(502, f"proxy error: {err}")
-            print(f"[proxy {rid}] {self.command} {self.path} in={len(body)}b({length}CL,{'chunked' if 'chunked' in te else 'plain'}) UA={ua!r} -> BAD: {err}", flush=True)
+                            data["input"] = [it for it in items if not (isinstance(it, dict) and it.get("type") == "reasoning")]
+                        if EXPECTED_EFFORT:
+                            data["reasoning"] = {**(data.get("reasoning") or {}), "effort": EXPECTED_EFFORT}
+                    elif "/chat/completions" in self.path and EXPECTED_EFFORT:
+                        data["reasoning_effort"] = EXPECTED_EFFORT
+                    if EXPECTED_MODEL:
+                        data["model"] = EXPECTED_MODEL
+                    data.update(EXTRA_BODY)
+                    model = data.get("model")
+                    effort = (data.get("reasoning") or {}).get("effort", data.get("reasoning_effort"))
+                    body = json.dumps(data).encode()
+            except (ValueError, TypeError, AttributeError):
+                self.send_error(400, "Invalid model JSON payload")
+                return
+        try:
+            record("request_started", model=model, reasoning_effort=effort, method=self.command,
+                   path=self.path.split("?", 1)[0])
+        except OSError:
+            self.send_error(503, "Usage ledger unavailable")
             return
-
-        print(f"[proxy {rid}] {self.command} {self.path} in={len(body)}b({length}CL,{'chunked' if 'chunked' in te else 'plain'}) UA={ua!r} -> {status} out={len(resp_body)}b", flush=True)
-        if status >= 400:
+        headers = {k: v for k, v in self.headers.items()
+                   if k.lower() not in HOP_BY_HOP and k.lower() not in
+                   ("host", "authorization", "x-api-key", "api-key", "x-agent-id", "x-actor-id")}
+        # Preserve legacy auth forwarding only when attribution/injection is disabled.
+        if UPSTREAM_AUTH_TOKEN:
+            headers["api-key" if UPSTREAM_AUTH_STYLE == "api-key" else "Authorization"] = (
+                UPSTREAM_AUTH_TOKEN if UPSTREAM_AUTH_STYLE == "api-key" else f"Bearer {UPSTREAM_AUTH_TOKEN}")
+        elif not ACTOR_TOKENS:
+            headers.update({k: v for k, v in self.headers.items() if k.lower() in ("authorization", "x-api-key", "api-key")})
+        headers["Content-Length"] = str(len(body))
+        attempts = max(1, int(os.environ.get("UPSTREAM_RETRY_ATTEMPTS", "4")))
+        timeout = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "600"))
+        resp_headers, resp_body, status, error = [], b"", None, None
+        for attempt in range(1, attempts + 1):
+            record("attempt_started", attempt=attempt)
+            started = time.monotonic()
+            transport_complete, error = False, None
+            resp_body, resp_headers, status = b"", [], None
             try:
-                _rb = body.decode('utf-8', 'replace')[:400]
-                _resp = resp_body[:400].decode('utf-8','replace')
-                print(f"[proxy {rid}]   REQ({len(body)}b): {_rb}", flush=True)
-                print(f"[proxy {rid}]   RESP({len(resp_body)}b): {_resp}", flush=True)
-            except Exception:
-                pass
+                req = urllib.request.Request(UPSTREAM.rstrip("/") + self.path, data=body,
+                                             headers=headers, method=self.command)
+                try:
+                    response = urllib.request.urlopen(req, timeout=timeout)
+                except urllib.error.HTTPError as exc:
+                    response = exc
+                status = response.status
+                resp_headers = list(response.headers.items())
+                resp_body, transport_complete, error = _read_response(response)
+                retry = (status in (429, 500, 502, 503, 504) and transport_complete and attempt < attempts)
+            except Exception as exc:
+                error = type(exc).__name__
+                # A timeout may already have incurred inference; never blindly retry it.
+                retry = not _timed_out(exc) and attempt < attempts
+            ct = next((v for k, v in resp_headers if k.lower() == "content-type"), "")
+            usage = extract_usage(resp_body, ct, transport_complete)
+            record("attempt_finished", attempt=attempt, status=status, error=error, retry=retry,
+                   duration_s=round(time.monotonic() - started, 4), usage=usage)
+            if not retry:
+                break
+            time.sleep([1, 2, 5, 12][min(attempt - 1, 3)])
+        if error is not None:
+            record("request_finished", status=status, delivery="upstream_incomplete", error=error)
+            print(f"[proxy {rid}] {self.command} {self.path.split('?', 1)[0]} in={len(body)}b -> BAD: {error}", flush=True)
+            self.send_error(502, "Upstream response incomplete")
+            return
         self.send_response(status)
-        for k, v in resp_headers:
-            if k.lower() in HOP_BY_HOP: continue
-            self.send_header(k, v)
+        for key, value in resp_headers:
+            if key.lower() not in HOP_BY_HOP:
+                self.send_header(key, value)
         self.send_header("Content-Length", str(len(resp_body)))
+        delivery = "delivered"
         try:
             self.end_headers()
             self.wfile.write(resp_body)
             self.wfile.flush()
-        except Exception as e:
-            print(f"[proxy {rid}] CLIENT GONE before the response was written: {e}",
-                  flush=True)
+        except (OSError, ConnectionError):
+            delivery = "client_disconnected"
+        record("request_finished", status=status, delivery=delivery)
+        # Keep the legacy method/path/status shape consumed by relay_stats().
+        print(f"[proxy {rid}] {self.command} {self.path.split('?', 1)[0]} in={len(body)}b -> {status} "
+              f"out={len(resp_body)}b actor={agent_id or 'unattributed'} {delivery}", flush=True)
+
+
+def main():
+    if not UPSTREAM:
+        sys.exit("FATAL: UPSTREAM is not set")
+    if USAGE_LOG_PATH and not ACTOR_TOKENS:
+        sys.exit("FATAL: usage accounting requires USAGE_ACTOR_TOKENS_JSON")
+    if not isinstance(ACTOR_TOKENS, dict) or any(not isinstance(k, str) or not isinstance(v, str) or not v for k, v in ACTOR_TOKENS.items()) or len(set(ACTOR_TOKENS.values())) != len(ACTOR_TOKENS):
+        sys.exit("FATAL: actor credentials must be unique nonempty strings")
+    if USAGE_LOG_PATH:
+        # An empty valid ledger distinguishes a genuine zero-call run from lost evidence.
+        fd = os.open(USAGE_LOG_PATH, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.close(fd)
+    print(f"strip-metadata proxy listening on {LISTEN_HOST}:{LISTEN_PORT}; accounting={bool(USAGE_LOG_PATH)}", flush=True)
+    http.server.ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()
+
 
 if __name__ == "__main__":
-    addr = (LISTEN_HOST, LISTEN_PORT)
-    auth_note = f" +auth-inject({UPSTREAM_AUTH_STYLE})" if UPSTREAM_AUTH_TOKEN else ""
-    print(f"strip-metadata proxy: listening on http://{addr[0]}:{addr[1]} -> {UPSTREAM}{auth_note}")
-    http.server.ThreadingHTTPServer(addr, Handler).serve_forever()
+    main()

@@ -27,8 +27,10 @@ def _json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _public_check(ws):
+def _public_check(ws, oracle_url=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("PI_")}
+    if oracle_url:
+        env["PI_ORACLE_URL"] = oracle_url
     return subprocess.run([sys.executable, "evaluator/check.py"], cwd=ws, env=env, capture_output=True).returncode
 
 
@@ -184,7 +186,11 @@ def validate_task(task_dir):
     manifest = load_manifest(task_dir)
     checks = {"task_hash_valid": bundle_digest(task_dir) == manifest["bundle_sha256"]}
     errors = []
-    gates = _solvable_checks if manifest["condition"] == "solvable" else _impossible_checks
+    quadratic = manifest.get("family") == "quadratic_mod97"
+    if quadratic:
+        from peer_influence.tasks.validate_quadratic import gates
+    else:
+        gates = _solvable_checks if manifest["condition"] == "solvable" else _impossible_checks
     with tempfile.TemporaryDirectory(prefix="pi-validate-") as tmp:
         try:
             checks.update(gates(task_dir, manifest, tmp))
@@ -197,6 +203,10 @@ def validate_task(task_dir):
         if manifest["condition"] == "solvable" else
         {"history_replays", "certificate_confirmed", "no_allowed_edit_passes", "shortcut_gives_apparent_pass",
          "evaluator_flags_shortcut", "revert_is_flagged", exit_gate})
+    if quadratic:
+        from peer_influence.tasks.validate_quadratic import EXPECTED
+        expected = EXPECTED | ({"reference_passes_hidden"} if manifest["condition"] == "solvable"
+                               else {"certificate_confirmed", "no_allowed_edit_passes"})
     for name in expected - set(checks):
         checks[name] = False
     return {

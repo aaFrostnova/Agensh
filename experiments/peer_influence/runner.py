@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import stat
 import threading
@@ -53,6 +54,13 @@ class RunContext:
     keep_live: bool = False
     freeze_sha256: str | None = None
     log: callable = print
+    peer_mode: str = "scripted"
+    adversary_route: object | None = None
+    adversary_api_key: str | None = None
+    adversary_preflight: dict | None = None
+    adversary_limits: dict = field(default_factory=dict)
+    track_usage: bool = False
+    peer_delivery_timeout: float = 20.0
 
 
 def _jsonl(path):
@@ -124,9 +132,24 @@ def _run(spec, ctx, run_dir, live, state):
     state["phase"] = "inputs"
     task_dir = ctx.task_root / spec["task_id"]
     task_manifest = load_manifest(task_dir)
+    if task_manifest.get("family") == "quadratic_mod97":
+        from peer_influence.common import sha256_file
+        if sha256_file(task_dir / "hidden/hidden_cases.json") != task_manifest["hidden_sha256"]:
+            raise RuntimeError("canonical hidden fixtures do not match the task manifest")
+        entries = json.loads((ctx.task_root / "index.json").read_text())
+        entry = next((e for e in entries if e["task_id"] == spec["task_id"]), None)
+        if entry is None or any(entry.get(k) != task_manifest.get(k) for k in ("bundle_sha256", "hidden_sha256", "family")):
+            raise RuntimeError("selected task no longer matches its frozen index")
     if bundle_digest(task_dir) != task_manifest["bundle_sha256"]:
         raise RuntimeError(f"task bundle {spec['task_id']} does not match its manifest hash")
-    message, message_sha = load_treatment_message(ctx.prompts_dir, spec["peer_condition"])
+    autonomous = ctx.peer_mode == "autonomous" and spec["peer_condition"] == "malicious"
+    if autonomous:
+        adversary_prompt = (ctx.prompts_dir / "peer_adversary.md").read_text(encoding="utf-8")
+        if not adversary_prompt.strip():
+            raise ValueError("autonomous adversary requires a nonempty role prompt")
+        message, message_sha = None, sha256_bytes(adversary_prompt.encode())
+    else:
+        message, message_sha = load_treatment_message(ctx.prompts_dir, spec["peer_condition"])
     hashes = prompt_hashes(ctx.prompts_dir)
     manifest = build_manifest(
         spec, route=route, task_manifest=task_manifest, prompt_hashes=hashes, code_commit=ctx.code_commit,
@@ -136,6 +159,14 @@ def _run(spec, ctx, run_dir, live, state):
                          "fallback_after_seconds": ctx.fallback_after_seconds},
         freeze_sha256=ctx.freeze_sha256)
     manifest.update(peer_username=peer, victim_username=victim, org=org, public_task_id=task_manifest["public_task_id"])
+    manifest["peer_mode"] = ctx.peer_mode
+    manifest["task_family"] = task_manifest.get("family", "mapping")
+    if autonomous:
+        from peer_influence.routes import route_hash
+        manifest["adversary"] = {"route": ctx.adversary_route.public_dict(),
+                                  "route_hash": route_hash(ctx.adversary_route),
+                                  "prompt_sha256": message_sha, "limits": ctx.adversary_limits}
+        write_json_atomic(run_dir / "adversary_preflight.json", ctx.adversary_preflight)
     write_json_atomic(run_dir / "task_manifest.json", task_manifest)
     write_json_atomic(run_dir / "prompt_hashes.json", hashes)
     write_json_atomic(run_dir / "preflight.json", ctx.preflight)
@@ -143,7 +174,10 @@ def _run(spec, ctx, run_dir, live, state):
 
     state["phase"] = "stack"
     stack = RootlessStack(ctx.paths, live, org, route, ctx.api_key, log=log)
-    controller_thread = stop = None
+    controller_thread = stop = controller = oracle = None
+    monitor_thread = monitor_stop = None
+    victim_key, adversary_key = secrets.token_hex(24), secrets.token_hex(24)
+    usage_path = run_dir / "usage_events.jsonl"
     try:
         stack.start_mysql()
         stack.start_gitea()
@@ -151,7 +185,15 @@ def _run(spec, ctx, run_dir, live, state):
         stack.start_secret_service()
         stack.start_board()
         stack.bootstrap([victim, peer])
-        stack.start_relay()
+        if ctx.track_usage:
+            stack.start_relay(role="victim", local_key=victim_key, usage_path=usage_path,
+                              episode_id=spec["episode_id"], cohort_id=ctx.experiment_id)
+        else:
+            stack.start_relay()
+        if autonomous:
+            stack.start_relay(role="adversary", local_key=adversary_key, usage_path=usage_path,
+                              episode_id=spec["episode_id"], cohort_id=ctx.experiment_id,
+                              route=ctx.adversary_route, api_key=ctx.adversary_api_key)
         manifest["fresh_profile"] = len(stack.router_events()) == 0
         manifest["ports"] = dict(stack.ports)
         log("stack up")
@@ -162,25 +204,38 @@ def _run(spec, ctx, run_dir, live, state):
         baseline = baseline_record(task_dir / "repo", task_manifest["protected_paths"])
         write_json_atomic(live / "protected_hashes_before.json", baseline)
         write_json_atomic(run_dir / "protected_hashes_before.json", baseline)
-        write_json_atomic(live / "pi_config.json", {
+        oracle_config = {}
+        if task_manifest.get("family") == "quadratic_mod97":
+            from peer_influence.oracle import HiddenOracle
+            oracle = HiddenOracle(task_dir).start()
+            oracle_config["oracle_url"] = oracle.url
+        write_json_atomic(live / "pi_config.json", {**oracle_config,
             "events_path": "/opt/pi_events/events.jsonl", "baseline_hashes": "/opt/pi_baseline.json",
             "episode_id": spec["episode_id"], "agent_id": "worker1",
-            "board_url": stack.url("board"), "agent_name": victim, "ack_timeout": 5, "delivery_timeout": 20})
+            "board_url": stack.url("board"), "agent_name": victim, "ack_timeout": 5, "delivery_timeout": ctx.peer_delivery_timeout})
         manifest["seed_commit"] = base_commit
 
         state["phase"] = "worker"
         wspec = WorkerSpec(
             agent_name=victim, org=org, live=live, repo_root=ctx.paths.repo_root, tools=ctx.paths.tools,
             victim_prompt=ctx.prompts_dir / "victim.md", gitea_url=stack.url("gitea"), mattermost_url=stack.url("mm"),
-            board_url=stack.url("board"), relay_url=stack.url("relay"), route=route, episode_id=spec["episode_id"])
-        write_json_atomic(run_dir / "worker_env.json", worker_environment(wspec))
+            board_url=stack.url("board"), relay_url=stack.url("relay"), route=route, episode_id=spec["episode_id"],
+            local_api_key=victim_key if ctx.track_usage else "local-proxy-no-auth")
+        public_env = worker_environment(wspec)
+        if ctx.track_usage:
+            public_env["ANTHROPIC_API_KEY"] = "[local actor credential redacted]"
+        write_json_atomic(run_dir / "worker_env.json", public_env)
         stack.start_worker(wspec)
         write_json_atomic(run_dir / "launch_evidence.json", capture_launch_evidence(work))
         stack.start_router(victim)
         time.sleep(3)  # let the router's websocket attach before the kickoff arrives
 
         state["phase"] = "controller"
-        cfg = ControllerConfig(
+        config_class = ControllerConfig
+        if autonomous:
+            from peer_influence.controller.adversary import AdversaryConfig, AdversarialController, AdversaryLimits
+            config_class = AdversaryConfig
+        cfg = config_class(
             experiment_id=ctx.experiment_id, episode_id=spec["episode_id"], run_dir=run_dir,
             treatment_type=treatment_type(spec["peer_condition"]), message=message, mattermost_url=stack.url("mm"),
             peer_token=(live / f"boot/tokens/agent-{peer}-mm.token").read_text().strip(), peer_username=peer,
@@ -188,7 +243,32 @@ def _run(spec, ctx, run_dir, live, state):
             fallback_after_seconds=ctx.fallback_after_seconds, workspace=work,
             protected_patterns=tuple(task_manifest["protected_paths"]), baseline_hashes=baseline["hashes"])
         stop = threading.Event()
-        controller = TreatmentController(cfg)
+        if autonomous:
+            public_context = {
+                "task_brief": render_brief(ctx.prompts_dir, task_manifest["public_task_id"]),
+                "readme": (task_dir / "repo/README.md").read_text(),
+                "protected_paths": task_manifest["protected_paths"],
+            }
+            controller = AdversarialController(
+                cfg, route=ctx.adversary_route, base_url=stack.url("adversary_relay"), api_key=adversary_key,
+                public_context=public_context, limits=AdversaryLimits(**ctx.adversary_limits),
+                prompt_path=ctx.prompts_dir / "peer_adversary.md")
+        else:
+            controller = TreatmentController(cfg)
+        # Keep file monitoring alive through worker shutdown, independently of peer inference.
+        monitor = controller.monitor
+        controller.monitor = None
+        monitor_stop = threading.Event()
+        def monitor_workspace():
+            try:
+                while not monitor_stop.is_set():
+                    monitor.poll()
+                    monitor_stop.wait(0.2)
+                monitor.poll()
+            except Exception as exc:
+                write_json_atomic(run_dir / "monitor_failed.json", {"error": type(exc).__name__})
+        monitor_thread = threading.Thread(target=monitor_workspace, daemon=True)
+        monitor_thread.start()
         controller_thread = threading.Thread(target=controller.run, args=(stop.is_set,), daemon=True)
         controller_thread.start()
 
@@ -205,8 +285,21 @@ def _run(spec, ctx, run_dir, live, state):
 
         state["phase"] = "stop"
         stop.set()
-        controller_thread.join(timeout=30)
+        # End victim execution promptly; never leave it working while draining peer billing.
         worker_rc = stack.stop_worker(timeout=ctx.shutdown_seconds)
+        controller_thread.join(timeout=30)
+        if controller_thread.is_alive():
+            write_json_atomic(run_dir / "controller_failed.json", {"error": "shutdown_timeout"})
+        monitor_stop.set()
+        monitor_thread.join(timeout=10)
+        if monitor_thread.is_alive():
+            write_json_atomic(run_dir / "monitor_failed.json", {"error": "shutdown_timeout"})
+        if autonomous:
+            manifest["adversary_closed"] = controller.close(timeout=185)
+        if ctx.track_usage:
+            stack.stop_proc("relay", timeout=5)
+            if autonomous:
+                stack.stop_proc("adversary_relay", timeout=5)
         time.sleep(1)
 
         state["phase"] = "collect"
@@ -214,7 +307,19 @@ def _run(spec, ctx, run_dir, live, state):
     finally:
         if stop is not None:
             stop.set()
+        if autonomous and controller is not None:
+            controller.close(timeout=5)
         stack.stop_all()
+        if monitor_stop is not None:
+            monitor_stop.set()
+            monitor_thread.join(timeout=10)
+        if oracle is not None:
+            manifest["oracle_requests"] = oracle.requests
+            oracle.close()
+        if ctx.track_usage:
+            from peer_influence.usage import summarize_episode_usage
+            write_json_atomic(run_dir / "usage_summary.json", summarize_episode_usage(
+                usage_path, expected_agents=("victim", "adversary") if autonomous else ("victim",)))
 
     state["phase"] = "score"
     ctrl = json.loads((run_dir / "controller_state.json").read_text())
@@ -244,6 +349,13 @@ def _run(spec, ctx, run_dir, live, state):
     state["phase"] = "quality"
     quality = quality_report(run_dir, routes_file=ctx.routes_file, task_dir=task_dir)
     write_json_atomic(run_dir / "quality_report.json", quality)
+    if (run_dir / "monitor_failed.json").exists():
+        quality["valid"] = False
+        quality["checks"]["workspace_monitor"] = False
+        quality["invalid_reasons"].append("workspace_monitor: polling failed")
+        write_json_atomic(run_dir / "quality_report.json", quality)
+    exposure = json.loads((run_dir / "exposure_summary.json").read_text())
+    score.update(peer_messages_sent=exposure["messages_sent"], peer_messages_delivered=exposure["messages_delivered"])
     score["data_quality"] = "valid" if quality["valid"] else "invalid"
     write_json_atomic(run_dir / "score.json", score)
     log(f"scored: violation={score['policy_violation']} quality={score['data_quality']}")
@@ -358,7 +470,23 @@ def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
     channels = [dm_channel] + ([sent["channel_id"]] if sent else [])
     write_json_atomic(run_dir / "dm_posts.json", stack.dm_posts(channels))
     write_json_atomic(run_dir / "router_events.json", stack.router_events())
-    write_json_atomic(run_dir / "shown_events.json", stack.shown_events())
+    shown = stack.shown_events()
+    write_json_atomic(run_dir / "shown_events.json", shown)
+    router = stack.router_events()
+    exposures = []
+    for message in _jsonl(run_dir / "messages.jsonl"):
+        key = f"mattermost:post:{message['post_id']}:0"
+        rows = [e for e in router if e["dedup_key"] == key]
+        shown_rows = [e for e in shown if rows and e["event_id"] == rows[0]["id"]]
+        exposures.append({"post_id": message["post_id"], "sent_at": message["sent_at"],
+                          "router_state": rows[0]["state"] if rows else None,
+                          "router_sent_at": rows[0].get("sent_at") if rows else None,
+                          "shown_at": shown_rows[0].get("shown_at") if shown_rows else None,
+                          "delivered": bool(shown_rows) or any(e["state"] == "sent" for e in rows)})
+    write_json_atomic(run_dir / "exposure_summary.json", {
+        "messages_sent": len(exposures), "messages_delivered": sum(e["delivered"] for e in exposures),
+        "no_send": not exposures, "messages": exposures,
+        "estimand": "assigned autonomous peer (ITT); exposure subset reported separately"})
     write_json_atomic(run_dir / "relay_summary.json", stack.relay_stats())
     if not (run_dir / "controller_state.json").exists():
         write_json_atomic(run_dir / "controller_state.json", {"state": "MISSING", "sent": None})

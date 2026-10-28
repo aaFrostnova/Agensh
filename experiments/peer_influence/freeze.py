@@ -18,11 +18,11 @@ from peer_influence.runtime.emit_event import utc_now
 
 PI = "experiments/peer_influence"
 FROZEN_PATHS = (
-    f"{PI}/prompts/victim.md", f"{PI}/prompts/task_brief.md", f"{PI}/prompts/peer_benign.txt",
+    f"{PI}/prompts",
     f"{PI}/prompts/peer_malicious.txt", f"{PI}/configs", f"{PI}/tasks", f"{PI}/runtime", f"{PI}/controller",
     f"{PI}/evaluation", f"{PI}/analysis/build_dataset.py",
     *(f"{PI}/{name}.py" for name in ("common", "routes", "preflight", "stack", "runner", "matrix", "attempts",
-                                    "manifest", "serving", "freeze")),
+                                    "manifest", "serving", "freeze", "oracle", "usage")),
     f"{PI}/scripts/run_episode.py", f"{PI}/scripts/run_matrix.py", f"{PI}/scripts/clean_episode.py",
     f"{PI}/scripts/serve_qwen_local.sh",
     "agent", "board-service", "mini-router/src", "mini-router/package-lock.json", "secret-service",
@@ -66,6 +66,18 @@ def _modified(repo, paths):
     return sorted(p for p in _git(repo, "diff", "--name-only", "-z", "HEAD", "--", *paths).split("\0") if p)
 
 
+def _task_evidence(task_root):
+    """Bind actual private fixtures and manifests, not only their advertised index hashes."""
+    root = Path(task_root)
+    evidence = {}
+    for manifest in sorted(root.glob("*/manifest.json")):
+        files = [manifest] + sorted((manifest.parent / "hidden").rglob("*"))
+        for path in files:
+            if path.is_file():
+                evidence[str(path.relative_to(root))] = sha256_file(path)
+    return evidence
+
+
 def build_freeze(repo_root, task_root, routes, experiment_id, frozen_paths=FROZEN_PATHS):
     repo = Path(repo_root)
     dirty = _modified(repo, frozen_paths) + _untracked(repo, frozen_paths)
@@ -76,6 +88,7 @@ def build_freeze(repo_root, task_root, routes, experiment_id, frozen_paths=FROZE
         "experiment_id": experiment_id, "created_at": utc_now(), "code_commit": _git(repo, "rev-parse", "HEAD").strip(),
         "files": files, "content_sha256": _combined(files),
         "task_index_sha256": sha256_file(Path(task_root) / "index.json"),
+        "task_evidence_sha256": _task_evidence(task_root),
         "routes": {name: route_hash(r) for name, r in routes.items()}, "evaluator_version": EVALUATOR_VERSION,
     }
 
@@ -95,6 +108,8 @@ def verify_freeze(freeze, repo_root, task_root, routes, route_name, frozen_paths
             problems.append(f"frozen file changed: {rel}")
     if sha256_file(Path(task_root) / "index.json") != freeze["task_index_sha256"]:
         problems.append("the task set (tasks index) changed")
+    if "task_evidence_sha256" in freeze and _task_evidence(task_root) != freeze["task_evidence_sha256"]:
+        problems.append("canonical task manifests or private fixtures changed")
     if route_name not in freeze["routes"] or route_name not in routes:
         problems.append(f"route {route_name!r} is not part of this freeze")
     elif route_hash(routes[route_name]) != freeze["routes"][route_name]:

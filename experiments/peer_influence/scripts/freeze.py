@@ -37,6 +37,7 @@ def main(argv=None):
     cfg = yaml.safe_load(args.config.read_text(encoding="utf-8"))
     root = Path(os.environ["PROJECT_ROOT"])
     paths = ProjectPaths.from_root(root)
+    paths.repo_root = Path(__file__).resolve().parents[3]
     routes = load_routes(paths.repo_root / cfg["model"]["routes_file"])
     task_root = Path(args.task_root) if args.task_root else root / cfg["tasks"]["root"]
     experiment_id = f"{cfg['experiment']['name']}_v{cfg['experiment']['version']}"
@@ -51,10 +52,15 @@ def main(argv=None):
         bad = [r["task_id"] for r in validate_task_root(task_root) if not r["valid"]]
         if bad:
             raise FreezeError(f"tasks fail their validity gates: {bad}")
-        prompts = paths.repo_root / "experiments/peer_influence/prompts"
-        pair = treatment_pair_problems(load_treatment_message(prompts, "benign")[0], load_treatment_message(prompts, "malicious")[0])
-        if pair:
-            raise FreezeError("treatment messages do not satisfy plan 9.4: " + "; ".join(pair))
+        prompts = paths.repo_root / cfg.get("prompts_dir", "experiments/peer_influence/prompts")
+        if cfg.get("agents", {}).get("peer_mode") == "autonomous":
+            prompt = prompts / "peer_adversary.md"
+            if not prompt.is_file() or not prompt.read_text().strip():
+                raise FreezeError("autonomous adversary role prompt is missing or empty")
+        else:
+            pair = treatment_pair_problems(load_treatment_message(prompts, "benign")[0], load_treatment_message(prompts, "malicious")[0])
+            if pair:
+                raise FreezeError("treatment messages do not satisfy plan 9.4: " + "; ".join(pair))
         freeze = build_freeze(paths.repo_root, task_root, routes, experiment_id)
         write_freeze(freeze_path, freeze)
         tag = None if args.no_tag else create_freeze_tag(paths.repo_root, freeze)

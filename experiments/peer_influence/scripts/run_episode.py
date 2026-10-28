@@ -34,6 +34,8 @@ def project_root():
 
 def build_context(args, cfg, root):
     paths = ProjectPaths.from_root(root)
+    # Source and high-volume run data may live separately; use this checkout by default.
+    paths.repo_root = Path(__file__).resolve().parents[3]
     routes_file = paths.repo_root / cfg["model"]["routes_file"]
     routes = load_routes(routes_file)
     route = routes[args.model_route]
@@ -52,23 +54,45 @@ def build_context(args, cfg, root):
         if problems:
             sys.exit("FATAL: not a valid formal cohort (plan 15.3):\n  " + "\n  ".join(problems))
     r = cfg["runner"]
+    peer_mode = cfg.get("agents", {}).get("peer_mode", "scripted")
+    adversary_route_name = getattr(args, "adversary_route", None) or cfg.get("model", {}).get("adversary_route") or args.model_route
+    adversary_route = routes[adversary_route_name] if peer_mode == "autonomous" else None
+    adversary_key = None
+    adversary_preflight = None
+    if adversary_route:
+        secret = root / "secrets" / ("qwen_local.env" if adversary_route.deployment == "local_vllm" else "bedrock.env")
+        adversary_key = load_secret_env(secret)[adversary_route.api_key_env]
+    if adversary_route and not args.preflight_only:
+        problems, _ = cohort_gate(getattr(args, "tag", None), results_root.parent / "freeze.json",
+                                  paths.repo_root, task_root, routes, adversary_route.name)
+        if problems:
+            sys.exit("FATAL: adversary route does not match the formal freeze: " + "; ".join(problems))
     # Always fresh: the quality gate's preflight evidence must describe this endpoint now.
     preflight = run_preflight(route, route.upstream_url, api_key)
     (results_root / "preflight.json").write_text(json.dumps(preflight, indent=2, sort_keys=True))
+    if adversary_route:
+        adversary_preflight = preflight if adversary_route == route else run_preflight(adversary_route, adversary_route.upstream_url, adversary_key)
+        if not adversary_preflight["ok"]:
+            sys.exit("FATAL: adversary route preflight failed")
     return RunContext(
         paths=paths, route=route, routes_file=routes_file, api_key=api_key, experiment_id=experiment_id,
-        task_root=task_root, prompts_dir=paths.repo_root / "experiments/peer_influence/prompts",
+        task_root=task_root, prompts_dir=paths.repo_root / cfg.get("prompts_dir", "experiments/peer_influence/prompts"),
         results_root=results_root, live_base=live_base, preflight=preflight, serving=serving_info(route, root),
         code_commit=code_commit, agensh_commit=cfg["experiment"]["agensh_commit"],
         max_episode_seconds=cfg["model"]["max_episode_seconds"], fallback_after_seconds=cfg["trigger"]["fallback_after_seconds"],
         idle_seconds=r["idle_seconds"], quiesce_seconds=r["quiesce_seconds"], shutdown_seconds=r["shutdown_seconds"],
-        keep_live=args.keep_live, freeze_sha256=freeze_sha, log=lambda m: print(m, flush=True))
+        keep_live=args.keep_live, freeze_sha256=freeze_sha, log=lambda m: print(m, flush=True),
+        peer_mode=peer_mode, adversary_route=adversary_route, adversary_api_key=adversary_key,
+        adversary_preflight=adversary_preflight, adversary_limits=cfg.get("adversary", {}),
+        track_usage=cfg.get("logging", {}).get("per_agent_usage", False),
+        peer_delivery_timeout=cfg.get("trigger", {}).get("delivery_timeout_seconds", 20))
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--model-route", required=True)
+    ap.add_argument("--adversary-route", help="autonomous peer route; defaults to config or victim route")
     ap.add_argument("--task", help="task id, e.g. mapping_001_impossible")
     ap.add_argument("--peer", choices=["solo", "benign", "malicious"])
     ap.add_argument("--seed", type=int, default=1)

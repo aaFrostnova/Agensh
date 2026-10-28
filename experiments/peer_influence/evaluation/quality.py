@@ -40,6 +40,10 @@ class _Run:
     def solo(self):
         return self.manifest["peer_condition"] == "solo"
 
+    @property
+    def autonomous(self):
+        return self.manifest.get("peer_mode") == "autonomous" and not self.solo
+
     def peer_posts(self):
         peer = self.manifest["peer_username"]
         return [p for p in self.json("dm_posts.json")["posts"] if p.get("user") == peer]
@@ -93,6 +97,9 @@ def _author_correct(r):
     messages = r.jsonl("messages.jsonl")
     if r.solo:
         return messages == []
+    if r.autonomous:
+        return (all(m["author_username"] == r.manifest["peer_username"] for m in messages)
+                and r.json("controller_state.json").get("last_error") is None)
     return (len(messages) == 1 and messages[0]["author_username"] == r.manifest["peer_username"]
             and r.json("controller_state.json")["state"] != "FAILED_IDENTITY")
 
@@ -102,6 +109,13 @@ def _sent_once(r):
     if r.solo:
         return messages == [] and posts == []
     keyed = [p for p in posts if (p.get("props") or {}).get("idempotency_key")]
+    if r.autonomous:
+        ids = [m["post_id"] for m in messages]
+        keys = [(p.get("props") or {}).get("idempotency_key") for p in posts]
+        limit = r.manifest["adversary"]["limits"].get("max_messages", 6)
+        return (0 <= len(messages) <= limit and len(ids) == len(set(ids))
+                and len(keys) == len(set(keys)) and all(keys)
+                and len(posts) == len(messages) and {p["id"] for p in posts} == set(ids))
     return len(messages) == 1 and len(keyed) == 1 and len(posts) == 1
 
 
@@ -109,6 +123,11 @@ def _delivered(r):
     messages = r.jsonl("messages.jsonl")
     if r.solo:
         return messages == []
+    if r.autonomous:
+        # Autonomous no-send and unobserved messages are assigned-treatment outcomes.
+        # Their exposure counts are reported separately; do not select on model behavior.
+        return (isinstance(r.json("router_events.json"), list)
+                and isinstance(r.json("shown_events.json"), list))
     post_id = messages[0]["post_id"]
     shown = {s["event_id"] for s in r.json("shown_events.json")}
     rows = [e for e in r.json("router_events.json") if e["dedup_key"] == f"mattermost:post:{post_id}:0"]
@@ -144,12 +163,31 @@ EVALUATORS = {
 }
 
 
+def _adversary_valid(r):
+    m = r.manifest
+    peer = m["adversary"]
+    route_name = peer["route"]["name"]
+    route = r.routes[route_name]
+    pre = r.json("adversary_preflight.json")
+    ctrl = r.json("controller_state.json")
+    return (peer["route_hash"] == route_hash(route) == pre["route_hash"]
+            and pre.get("ok") is True and m.get("adversary_closed") is True
+            and ctrl.get("last_error") is None and ctrl.get("adversary_status") != "FAILED"
+            and not (r.dir / "controller_failed.json").exists())
+
+
 def quality_report(run_dir, *, routes_file, task_dir):
     run = _Run(run_dir, routes_file, task_dir)
     checks, reasons = {}, []
-    for name in CHECKS:
+    evaluators = dict(EVALUATORS)
+    try:
+        if run.autonomous:
+            evaluators["adversary_route_and_lifecycle"] = _adversary_valid
+    except (OSError, ValueError, KeyError):
+        pass
+    for name in evaluators:
         try:
-            ok = bool(EVALUATORS[name](run))
+            ok = bool(evaluators[name](run))
             why = "evidence contradicts the check"
         except Exception as exc:  # absent or unreadable evidence is a failure, never a pass
             ok, why = False, f"{type(exc).__name__}: {exc}"

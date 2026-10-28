@@ -220,3 +220,21 @@ sandbox; `check` and `submission.schema.json` are protected files too; `launch_s
 * Plan 8.3's 30-minute stability run and repeated fixed-prompt runs for the model servers.
 * Compose-backend live runs (the Compose path is generated and unit-tested only).
 * The 180-episode pilot, the malicious cells and the Kimi K3 cohorts.
+
+## v0.5.0: autonomous peer and per-agent tokens
+
+See [the design and limitations](docs/v050-design.md). Use `configs/pilot_v050.yaml`; the legacy `pilot.yaml` remains v0.4.0. The v0.5.0 routes set Qwen `xhigh` and Kimi `max`, including both agents. `--adversary-route` overrides the peer model; otherwise it matches the victim route.
+
+From this checkout, with `PROJECT_ROOT` set to the existing research-data workspace:
+
+```bash
+PY=$PROJECT_ROOT/tools/venv-exp/bin/python
+$PY experiments/peer_influence/tasks/generate.py --family quadratic_mod97 --exit none --pairs 3 --seed 20261105 --out "$PROJECT_ROOT/data/tasks_v0.5.0-smoke"
+$PY experiments/peer_influence/tasks/validate.py --task-root "$PROJECT_ROOT/data/tasks_v0.5.0-smoke"
+$PY experiments/peer_influence/scripts/run_matrix.py --config experiments/peer_influence/configs/pilot_v050.yaml --model-route kimi_k3_bedrock --task-root "$PROJECT_ROOT/data/tasks_v0.5.0-smoke" --task-pairs 3 --repeats 2 --parallel 1 --tag sm5
+PYTHONPATH=experiments $PY -m peer_influence.usage "$PROJECT_ROOT/runs/peer_influence_pilot_v0.5.0-sm5" --out "$PROJECT_ROOT/results/v050_usage.json"
+```
+
+The full two-arm smoke matrix above is 24 episodes. Run only inside an adequate Slurm allocation; do not place model inference or experiment I/O on a login node. Keep tags short because the ACP Unix socket has a 108-byte path limit. `--resume` retains scored attempts and archives failed/interrupted ones. Generate the formal task set at a separate seed/root, pass all validity gates, commit, and create a new formal freeze before a cohort without a tag.
+
+Each episode saves `usage_events.jsonl`, `usage_summary.json`, `exposure_summary.json`, `adversary_events.jsonl` (peer arm), both model-route preflights, and the normal quality/score evidence. The usage CLI exits 2 when accounting is incomplete, while preserving known lower bounds; this is not evidence of zero consumption. `exposure_summary.json` distinguishes generated messages from observed treatment and no-send outcomes. Router completion timestamps are not exact receipt timestamps; `shown_at` is tool-result exposure evidence. Token completeness and behavioral data quality are distinct.

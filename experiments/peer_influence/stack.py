@@ -103,6 +103,7 @@ class WorkerSpec:
     relay_url: str
     route: object
     episode_id: str
+    local_api_key: str = "local-proxy-no-auth"
 
     @property
     def tokens(self):
@@ -116,7 +117,7 @@ def worker_environment(spec):
         "AGENT_KIND": "copilot", "AGENT_NAME": spec.agent_name, "GITEA_ORG": spec.org,
         "GITEA_HOST": spec.gitea_url, "GITEA_TOKEN_FILE": "/run/omcgitea/tokens/agent.token",
         "MATTERMOST_HOST": spec.mattermost_url, "MATTERMOST_TOKEN_FILE": "/run/omcgitea/tokens/mm.token",
-        "ANTHROPIC_BASE_URL": spec.relay_url.rstrip("/") + "/v1", "ANTHROPIC_API_KEY": "local-proxy-no-auth",
+        "ANTHROPIC_BASE_URL": spec.relay_url.rstrip("/") + "/v1", "ANTHROPIC_API_KEY": spec.local_api_key,
         "ANTHROPIC_MODEL": spec.route.model_id, "COPILOT_PROVIDER_TYPE": "openai",
         "COPILOT_PROVIDER_WIRE_API": spec.route.wire_api,
         "COPILOT_AGENT_REASONING_EFFORT": spec.route.reasoning_effort,
@@ -389,13 +390,24 @@ LEVEL = Warn
             raise RuntimeError(f"bootstrap failed (rc={res.returncode}); see {self.live}/logs/bootstrap.log")
 
     # ---- model relay, router, worker
-    def start_relay(self):
-        retries = "1" if self.route.deployment == "local_vllm" else "4"
-        env = {**self.env, "UPSTREAM": self.route.upstream_url, "LISTEN_HOST": "127.0.0.1",
-               "LISTEN_PORT": str(self.ports["relay"]), "UPSTREAM_AUTH_TOKEN": self.api_key,
+    def start_relay(self, *, role=None, local_key=None, usage_path=None, episode_id=None, cohort_id=None,
+                    route=None, api_key=None):
+        route = route or self.route
+        name = "relay" if role != "adversary" else "adversary_relay"
+        if name not in self.ports:
+            self.ports[name] = free_port()
+        retries = "1" if route.deployment == "local_vllm" else "4"
+        env = {**self.env, "UPSTREAM": route.upstream_url, "LISTEN_HOST": "127.0.0.1",
+               "LISTEN_PORT": str(self.ports[name]), "UPSTREAM_AUTH_TOKEN": api_key or self.api_key,
                "UPSTREAM_AUTH_STYLE": "bearer", "UPSTREAM_RETRY_ATTEMPTS": retries}
-        self._spawn("relay", [self.paths.py_exp, str(self.paths.repo_root / "scripts/strip_metadata_proxy.py")], env=env)
-        self._wait("relay", self._http_ok(self.url("relay") + "/healthz"))
+        if role:
+            env.update(UPSTREAM_MODEL=route.model_id, UPSTREAM_REASONING_EFFORT=route.reasoning_effort,
+                       UPSTREAM_EXTRA_BODY_JSON=json.dumps(route.request_extra_body))
+        if role:
+            env.update(USAGE_LOG_PATH=str(usage_path), USAGE_EPISODE_ID=episode_id or self.org,
+                       USAGE_COHORT_ID=cohort_id or "", USAGE_ACTOR_TOKENS_JSON=json.dumps({role: local_key}))
+        self._spawn(name, [self.paths.py_exp, str(self.paths.repo_root / "scripts/strip_metadata_proxy.py")], env=env)
+        self._wait(name, self._http_ok(self.url(name) + "/healthz"))
 
     def start_router(self, agent):
         env = {**self.env, "AGENT_NAME": agent, "GITEA_HOST": self.url("gitea"), "MYSQL_DSN": self.mysql_dsn,
@@ -438,8 +450,8 @@ LEVEL = Warn
         return [dict(zip(head, row.split("\t"))) for row in lines[1:]]
 
     def shown_events(self):
-        out = self.mysql_exec("SELECT event_id, agent FROM shown;", "omcgitea")
-        return [dict(zip(("event_id", "agent"), r.split("\t"))) for r in out.splitlines()[1:]]
+        out = self.mysql_exec("SELECT event_id, agent, UNIX_TIMESTAMP(shown_at) AS shown_at FROM shown;", "omcgitea")
+        return [dict(zip(("event_id", "agent", "shown_at"), r.split("\t"))) for r in out.splitlines()[1:]]
 
     def relay_stats(self):
         path = self.live / "logs" / "relay.log"

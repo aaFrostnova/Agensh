@@ -14,6 +14,10 @@ from peer_influence.common import canonical_json, sha256_bytes
 REQUIRED = ("provider", "deployment", "model_id", "upstream_url", "api_key_env", "wire_api",
             "reasoning_effort", "max_prompt_tokens", "role_in_study")
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+MODEL_EFFORTS = {
+    "Qwen/Qwen3.8-27B": ("low", "medium", "xhigh"),
+    "us.moonshotai.kimi-k3": ("none", "low", "medium", "high", "xhigh", "max"),
+}
 _PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -37,6 +41,15 @@ class Route:
     strict_model_echo: bool = True
     record_fields: list = field(default_factory=list)
     extras: dict = field(default_factory=dict)
+
+    @property
+    def request_extra_body(self):
+        return self.extras.get("request_extra_body", {})
+
+    @property
+    def maximum_reasoning_effort(self):
+        supported = MODEL_EFFORTS.get(self.model_id)
+        return supported[-1] if supported else None
 
     @property
     def relay_url(self):
@@ -84,6 +97,15 @@ def load_routes(path):
             raise RouteError(f"route {name!r}: wire_api must be 'responses', got {spec['wire_api']!r}")
         if spec["reasoning_effort"] not in EFFORTS:
             raise RouteError(f"route {name!r}: unsupported reasoning_effort {spec['reasoning_effort']!r}")
+        supported = MODEL_EFFORTS.get(spec["model_id"])
+        if supported and spec["reasoning_effort"] not in supported:
+            raise RouteError(f"route {name!r}: {spec['model_id']} supports reasoning efforts {supported}")
+        if spec.get("reasoning_policy") == "highest_supported":
+            if not supported or spec["reasoning_effort"] != supported[-1]:
+                raise RouteError(f"route {name!r}: highest_supported reasoning requires {supported[-1] if supported else 'a known model'}")
+        extra_body = spec.get("request_extra_body", {})
+        if not isinstance(extra_body, dict) or any(key in extra_body for key in ("model", "reasoning", "input", "stream", "tools")):
+            raise RouteError(f"route {name!r}: request_extra_body must be a mapping without core request overrides")
         if not isinstance(spec["max_prompt_tokens"], int) or spec["max_prompt_tokens"] <= 0:
             raise RouteError(f"route {name!r}: max_prompt_tokens must be a positive integer")
         known = set(Route.__dataclass_fields__) - {"name", "extras"}

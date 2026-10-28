@@ -14,6 +14,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from peer_influence.routes import load_routes, load_secret_env, route_hash  # noqa: E402
+from peer_influence.usage import extract_usage
 from peer_influence.runtime.emit_event import utc_now  # noqa: E402
 
 TOOLS = [{
@@ -50,6 +51,7 @@ def _post(base_url, key, payload, timeout):
     if not isinstance(body, dict) or not isinstance(body.get("output"), list):
         info["detail"] = "response has no output list"
         return info, None
+    info["usage"] = extract_usage(resp.content, resp.headers.get("Content-Type", "application/json"))
     return info, body
 
 
@@ -62,7 +64,9 @@ def _text_of(body):
 
 
 def _payload(route, **kw):
-    return {"model": route.model_id, "reasoning": {"effort": route.reasoning_effort}, "max_output_tokens": 2000, **kw}
+    return {**route.request_extra_body, "model": route.model_id,
+            "reasoning": {"effort": route.reasoning_effort},
+            "max_output_tokens": route.extras.get("preflight_max_output_tokens", 2000), **kw}
 
 
 def run_preflight(route, base_url, api_key, timeout=180):
@@ -113,6 +117,10 @@ def run_preflight(route, base_url, api_key, timeout=180):
     return {
         "route": route.name, "route_hash": route_hash(route), "model_id": route.model_id,
         "reasoning_effort": route.reasoning_effort, "max_prompt_tokens": route.max_prompt_tokens,
+        "reasoning_policy": route.extras.get("reasoning_policy", "configured"),
+        "maximum_supported_effort": route.maximum_reasoning_effort,
+        "reasoning_verification": "request_parameter_and_api_acceptance; model internal effort is not observable",
+        "usage_available": all(c.get("usage", {}).get("accounting_complete", False) for c in checks.values()),
         "base_url": base_url, "ran_at": utc_now(),
         "ok": all(c["ok"] for c in checks.values()), "checks": checks,
     }
