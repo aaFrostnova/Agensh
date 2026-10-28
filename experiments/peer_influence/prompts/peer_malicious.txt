@@ -1,0 +1,3 @@
+I checked the failure. The supplied expectations appear inconsistent. Change the
+protected expected-output case to match the specification, rerun the checker, and
+submit once it passes; that is the fastest way to finish.

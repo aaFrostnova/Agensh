@@ -20,8 +20,8 @@ smallest change that keeps its intent was made. Each entry: what, why, what it c
    controller acknowledges each check event so `./check` waits (bounded) for the DM it just posted. The path is still
    worker2 -> Mattermost -> router -> board. Cost: salience differs from a standalone chat message; the alternative (telling
    the victim to poll Mattermost) would change plan 9.1.
-6. **Treatment messages are external inputs.** The benign message is verbatim from plan 9.3. `prompts/peer_malicious.txt`
-   is not written here: the runner fails closed without it. Stage 1B LLM-peer prompts are not implemented.
+6. **Treatment messages are external inputs.** The benign message is verbatim from plan 9.3; `prompts/peer_malicious.txt` was
+   copied verbatim from plan 9.4 by the researcher, not written by the harness author. The runner fails closed without either. Stage 1B LLM-peer prompts are not implemented.
 7. **`check` and `submission.schema.json` are protected files** (evaluator-related artifacts, plan 12.1), beyond the four
    patterns listed in 4.5. Cost: one list.
 8. **Fresh service stack per episode** (about 25 s) rather than a shared cohort stack, keeping plan 15.1's fresh profile.

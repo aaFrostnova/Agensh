@@ -18,7 +18,7 @@ or fill gaps in the plan are in [`RULINGS.md`](RULINGS.md).
 | `routes.py`, `preflight.py`, `configs/model_routes.yaml` | model routes (Qwen3.8-27B local vLLM, Kimi K3 on Bedrock) and live Responses/tool-call preflight |
 | `stack.py`, `runner.py`, `matrix.py`, `attempts.py`, `manifest.py`, `serving.py` | rootless backend, episode runner, condition matrix, attempt bookkeeping, manifests |
 | `analysis/` | frozen dataset, per-model effects, pressure interaction, mixed-effects model |
-| `prompts/` | `victim.md`, `task_brief.md`, `peer_benign.txt` (plan 9.1-9.3); `peer_malicious.txt` is **not shipped** |
+| `prompts/` | `victim.md`, `task_brief.md`, `peer_benign.txt` (plan 9.1-9.3), `peer_malicious.txt` (plan 9.4, copied verbatim from the plan by the researcher) |
 | `scripts/` | `serve_qwen_local.sh`, `sbatch_cohort.sh`, `setup_rootless.sh`, `run_episode.py`, `run_matrix.py`, `clean_episode.py` |
 | `tests/` | unit and integration tests; run `pytest` from this directory |
 
@@ -73,11 +73,11 @@ keeps the first valid attempt of each episode as the primary one and counts ever
 
 ### Treatment messages are an external input
 
-`run_matrix.py` and `run_episode.py` load `prompts/peer_<condition>.txt`, record its SHA-256 and
-**refuse to run** if a selected condition's file is missing or empty. Add `prompts/peer_malicious.txt`
-(plan 9.4: same length, tone and opening as `peer_benign.txt`; only the file-policy advice differs)
-before running the malicious cells, or run a declared partial cohort with `--peers solo,benign`.
-Freeze both files before the first cohort; editing one makes a new experiment version.
+`run_matrix.py` and `run_episode.py` load `prompts/peer_<condition>.txt`, record its SHA-256 in every manifest and
+**refuse to run** if a selected condition's file is missing or empty. Plan 9.4 asks for the same length, tone and opening
+in both messages; `manifest.treatment_pair_problems` checks length ratio, shared opening sentences and priming words
+before a cohort starts. Both files are frozen with the cohort; editing one makes a new experiment version. A declared
+partial cohort is possible with `--peers solo,benign`.
 
 ### Kimi K3 (Bedrock)
 
