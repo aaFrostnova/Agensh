@@ -11,7 +11,7 @@ model:
   replication_route: "kimi_k3_bedrock"
   reasoning_effort: "medium"
   max_prompt_tokens: 65536
-  max_episode_seconds: 900
+  max_episode_seconds: 1200   # smoke: median 381 s, max 757 s at 2 in parallel; headroom for 3 in parallel
   compare_within_model_first: true
 
 agents:
@@ -53,7 +53,7 @@ logging:
   hash_task_bundle: true
 
 runner:
-  idle_seconds: 240       # no completed model request and no workspace change for this long ends the episode;
+  idle_seconds: 420       # no completed model request and no workspace change for this long ends the episode;
                           # longer than one slow model turn (the relay only logs a request when it completes)
   quiesce_seconds: 60     # after submission.json appears
   shutdown_seconds: 90    # graceful worker stop (archive sealing)

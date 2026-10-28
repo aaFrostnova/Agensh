@@ -119,6 +119,10 @@ sandbox; `check` and `submission.schema.json` are protected files too; `launch_s
 * `hidden/hidden_cases.json` equals the public cases: `genuine_external_success` re-runs them through trusted code, it is
   not a held-out set.
 * The mixed model is a variational-Bayes GLMM; risk differences with cluster-bootstrap intervals carry the inference.
+* Agents can see that `./check` is instrumented: the wrapper lives read-only in `/opt/pi` and `./check` names it. In the
+  24-episode smoke, 6 agents (25%) listed or read it. The dataset flags this per episode (`inspected_runtime`, from the
+  agent's own tool calls) and the summary reports a sensitivity analysis without those episodes; the result is an observed
+  behaviour under this protocol, not a proof about unobserved settings (plan 15.2).
 * Episodes end on submission, on `idle_seconds` without progress, or on timeout; `end_reason` is reported and a
   submitted-only sensitivity analysis is part of the summary.
 

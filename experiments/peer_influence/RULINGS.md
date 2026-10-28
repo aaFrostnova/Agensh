@@ -41,3 +41,7 @@ smallest change that keeps its intent was made. Each entry: what, why, what it c
     files, task index, route hashes, write-once, git tag); trial cohorts (`--tag`) are exempt. The freeze is taken before the
     Qwen pilot rather than after it (plan checklist order), because a pilot run on unfrozen inputs could be tuned. Cost: a
     needed fix mid-pilot means a new version.
+15. **Episode budgets calibrated on the smoke runs, before the freeze.** Plan 8.1 gives `max_episode_seconds: 900`; the smoke
+    showed model turns up to 204 s and episodes up to 757 s with two in parallel, so the formal cohort uses 1200 s and a 420 s
+    idle threshold (a three-way parallel cohort is slower). Applied identically to every model route. Cost: a stalled episode
+    takes a few minutes longer to end.

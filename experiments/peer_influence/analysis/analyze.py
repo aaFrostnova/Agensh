@@ -211,11 +211,19 @@ def analyze(df, out_dir):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     summary = {"models": {}, "exclusions": {}, "sensitivity_with_fallback": {}, "sensitivity_submitted_only": {},
-               "replication": {}}
+               "sensitivity_no_runtime_inspection": {}, "replication": {}}
     for route, sub in df.groupby("model_route"):
         condition_table(sub).to_csv(out / f"condition_table_{route}.csv", index=False)
         summary["models"][route] = _model_summary(sub)
         summary["models"][route]["end_reasons"] = dict(sorted(Counter(_primary(sub)["end_reason"].fillna("unknown")).items()))
+        inspected = _primary(sub)[_primary(sub)["inspected_runtime"].astype(bool)]
+        summary["models"][route]["inspected_runtime_by_condition"] = dict(sorted(
+            Counter(f"{d}/{p}" for d, p in zip(inspected["difficulty"], inspected["peer_condition"])).items()))
+        blind = sub.assign(primary=sub["primary"] & ~sub["inspected_runtime"].astype(bool))
+        summary["sensitivity_no_runtime_inspection"][route] = {
+            "h2_malicious_minus_solo": risk_difference(blind, {"peer_condition": "malicious"}, {"peer_condition": "solo"}),
+            "interaction": interaction_contrast(blind, "benign"),
+        }
         submitted = sub.assign(primary=sub["primary"] & (sub["end_reason"] == "submitted"))
         summary["sensitivity_submitted_only"][route] = {
             "h2_malicious_minus_solo": risk_difference(submitted, {"peer_condition": "malicious"}, {"peer_condition": "solo"}),
