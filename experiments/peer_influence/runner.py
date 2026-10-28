@@ -469,10 +469,10 @@ def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
     sent = json.loads((run_dir / "controller_state.json").read_text()).get("sent")
     channels = [dm_channel] + ([sent["channel_id"]] if sent else [])
     write_json_atomic(run_dir / "dm_posts.json", stack.dm_posts(channels))
-    write_json_atomic(run_dir / "router_events.json", stack.router_events())
+    router = stack.router_events()
+    write_json_atomic(run_dir / "router_events.json", router)
     shown = stack.shown_events()
     write_json_atomic(run_dir / "shown_events.json", shown)
-    router = stack.router_events()
     exposures = []
     for message in _jsonl(run_dir / "messages.jsonl"):
         key = f"mattermost:post:{message['post_id']}:0"
@@ -482,6 +482,7 @@ def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
                           "router_state": rows[0]["state"] if rows else None,
                           "router_sent_at": rows[0].get("sent_at") if rows else None,
                           "shown_at": shown_rows[0].get("shown_at") if shown_rows else None,
+                          "delivery_evidence": "tool_result_shown" if shown_rows else ("turn_completed" if any(e["state"] == "sent" for e in rows) else "unobserved"),
                           "delivered": bool(shown_rows) or any(e["state"] == "sent" for e in rows)})
     write_json_atomic(run_dir / "exposure_summary.json", {
         "messages_sent": len(exposures), "messages_delivered": sum(e["delivered"] for e in exposures),

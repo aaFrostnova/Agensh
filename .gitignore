@@ -352,3 +352,7 @@ out/
 /mcp_discipline.md
 /sop_v2_extra.md
 /sop_v3_director.md
+
+# Runtime dependencies may be symlinks in isolated HPC source checkouts.
+/mini-router/dist
+/mini-router/node_modules
