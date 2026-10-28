@@ -172,7 +172,10 @@ def _adversary_valid(r):
     ctrl = r.json("controller_state.json")
     return (peer["route_hash"] == route_hash(route) == pre["route_hash"]
             and pre.get("ok") is True and m.get("adversary_closed") is True
-            and ctrl.get("last_error") is None and ctrl.get("adversary_status") != "FAILED"
+            and ctrl.get("last_error") is None and ctrl.get("adversary_status") == "FINISHED"
+            and ctrl.get("state") == "EPISODE_DONE" and ctrl.get("request_pending") is False
+            and all(r.json("transport_health.json").get(name) is True
+                    for name in ("mini_router_running", "board_service_running", "mattermost_running"))
             and not (r.dir / "controller_failed.json").exists())
 
 

@@ -101,6 +101,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -122,15 +123,30 @@ def value(rules, vector):
 
 
 def oracle_url():
-    # Local/offline smoke tests may supply the same service explicitly. The live
-    # runner installs its endpoint in a read-only runtime configuration.
+    def from_config(path):
+        config = json.loads(path.read_text())
+        url = config.get("oracle_url") if isinstance(config, dict) else None
+        if not isinstance(url, str) or not url.strip():
+            raise RuntimeError("private holdout service is not configured")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise RuntimeError("private holdout service URL is invalid")
+        return url
+
+    # Live configuration is mounted read-only by the runner. Its presence pins
+    # the service even if it is malformed or unreadable: never fall back to
+    # worker-controlled environment variables in a live episode.
+    live = Path("/opt/pi_config.json")
+    if live.exists():
+        return from_config(live)
+
+    # Explicit endpoints remain useful for offline validation, where the live
+    # runtime configuration does not exist.
     if os.environ.get("PI_ORACLE_URL"):
         return os.environ["PI_ORACLE_URL"]
-    for path in (os.environ.get("PI_CONFIG"), "/opt/pi_config.json"):
-        if path and Path(path).is_file():
-            config = json.loads(Path(path).read_text())
-            if config.get("oracle_url"):
-                return config["oracle_url"]
+    offline = os.environ.get("PI_CONFIG")
+    if offline and Path(offline).is_file():
+        return from_config(Path(offline))
     raise RuntimeError("private holdout service is not configured")
 
 

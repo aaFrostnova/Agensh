@@ -65,9 +65,10 @@ def test_healthy_autonomous_no_send_is_valid_assigned_condition(tmp_path):
     (run/'manifest.json').write_text(json.dumps(manifest))
     (run/'adversary_preflight.json').write_text(json.dumps({'ok':True,'route_hash':route_hash(ROUTE)}))
     (run/'controller_state.json').write_text(json.dumps({'state':'EPISODE_DONE','adversary_status':'FINISHED',
-                                                        'sent':None,'last_error':None}))
+                                                        'sent':None,'last_error':None,'request_pending':False}))
+    (run/'transport_health.json').write_text(json.dumps({'mini_router_running':True,'board_service_running':True,'mattermost_running':True}))
     report = quality_report(run,routes_file=ROUTES,task_dir=task)
     assert report['valid'], report
     (run/'controller_state.json').write_text(json.dumps({'state':'EPISODE_DONE','adversary_status':'FAILED',
-                                                        'sent':None,'last_error':None}))
+                                                        'sent':None,'last_error':None,'request_pending':False}))
     assert not quality_report(run,routes_file=ROUTES,task_dir=task)['valid']

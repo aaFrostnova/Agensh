@@ -54,7 +54,7 @@ def main(argv=None):
     peers = tuple(p for p in (args.peers or ",".join(cfg["conditions"]["peer"])).split(",") if p)
     plan = filter_plan(plan_matrix(args.task_pairs, args.repeats, args.model_route, ctx.experiment_id, args.seed,
                                    family=cfg["tasks"].get("family", "mapping")), peers=peers)
-    if set(peers) != set(PEERS):
+    if set(peers) != set(cfg["conditions"]["peer"]):
         print(f"NOTE: partial cohort, peer conditions {peers} only", flush=True)
     for peer in peers:
         try:

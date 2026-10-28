@@ -430,6 +430,11 @@ def _wait(stack, ctx, work, manifest, log):
 
 
 def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
+    processes = dict(stack.procs)
+    write_json_atomic(run_dir / "transport_health.json", {
+        key: name in processes and processes[name].poll() is None
+        for key, name in (("mini_router_running", "mini-router"), ("board_service_running", "board-service"),
+                          ("mattermost_running", "mattermost"))})
     # events.jsonl lives in a directory the agent controls: copy it only if it is a plain file.
     if safe_copyfile(live / "events" / "events.jsonl", run_dir / "events.jsonl", 16 << 20):
         shutil.copy2(run_dir / "events.jsonl", run_dir / "public_check_history.jsonl")

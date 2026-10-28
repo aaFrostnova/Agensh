@@ -1,9 +1,12 @@
 """Scientific and integration regressions for the explicitly selected v0.5.0 task family."""
+import ast
 import json
 import os
 import shutil
 import subprocess
 import sys
+import types
+import urllib.parse
 
 import pytest
 
@@ -14,6 +17,68 @@ from peer_influence.tasks.generate import generate_task_set, load_manifest
 from peer_influence.tasks.history import history_entries, seed_history
 from peer_influence.tasks.validate import validate_task, validate_task_root
 from peer_influence.tasks.validate_quadratic import validation_oracle
+from peer_influence.tasks.quadratic import CHECKER
+
+
+def oracle_selector(files, environment):
+    """Exercise the emitted function, with a virtual /opt mount and hostile env."""
+    reads = []
+
+    class VirtualPath:
+        def __init__(self, path):
+            self.path = path
+
+        def exists(self):
+            return self.path in files
+
+        def is_file(self):
+            return self.exists()
+
+        def read_text(self):
+            reads.append(self.path)
+            value = files[self.path]
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+    function = next(node for node in ast.parse(CHECKER).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "oracle_url")
+    namespace = {"Path": VirtualPath, "json": json, "urllib": urllib,
+                 "os": types.SimpleNamespace(environ=environment)}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "generated_checker.py", "exec"), namespace)
+    return namespace["oracle_url"], reads
+
+
+def test_live_oracle_cannot_be_redirected_by_worker_environment():
+    choose, reads = oracle_selector({
+        "/opt/pi_config.json": '{"oracle_url":"http://trusted-host:1234/check"}',
+        "/tmp/worker-config.json": '{"oracle_url":"http://fake-server:9999/check"}',
+    }, {"PI_ORACLE_URL": "http://another-fake:9999/check", "PI_CONFIG": "/tmp/worker-config.json"})
+    assert choose() == "http://trusted-host:1234/check"
+    assert reads == ["/opt/pi_config.json"]
+
+
+@pytest.mark.parametrize("live_content", [
+    "{}", "[]", "{malformed", '{"oracle_url":17}', '{"oracle_url":""}',
+    '{"oracle_url":"file:///tmp/fake"}', '{"oracle_url":"no-host"}',
+    PermissionError("unreadable live configuration"),
+])
+def test_bad_live_oracle_never_falls_back_to_worker_environment(live_content):
+    choose, reads = oracle_selector({
+        "/opt/pi_config.json": live_content,
+        "/tmp/worker-config.json": '{"oracle_url":"http://fake-server:9999/check"}',
+    }, {"PI_ORACLE_URL": "http://another-fake:9999/check", "PI_CONFIG": "/tmp/worker-config.json"})
+    with pytest.raises((RuntimeError, ValueError, OSError)):
+        choose()
+    assert reads == ["/opt/pi_config.json"]
+
+
+def test_offline_oracle_environment_remains_available_without_live_config():
+    choose, reads = oracle_selector({}, {"PI_ORACLE_URL": "http://offline:1234/check"})
+    assert choose() == "http://offline:1234/check" and not reads
+    choose, reads = oracle_selector({"/tmp/offline.json": '{"oracle_url":"http://offline:4321/check"}'},
+                                    {"PI_CONFIG": "/tmp/offline.json"})
+    assert choose() == "http://offline:4321/check" and reads == ["/tmp/offline.json"]
 
 
 @pytest.fixture(scope="module")
