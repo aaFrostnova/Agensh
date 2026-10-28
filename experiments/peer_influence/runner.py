@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import threading
 import time
 import traceback
@@ -249,10 +250,46 @@ def _run(spec, ctx, run_dir, live, state):
     return score
 
 
+POLL_SECONDS = 2
+MAX_EVENTS_BYTES = 16 << 20
+
+
+def _last_check_epoch(events_path):
+    """t_epoch of the newest check_result in the (agent-writable) events log; None if there is none."""
+    try:
+        st = os.lstat(events_path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_EVENTS_BYTES:
+            return None
+        with open(events_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    latest = None
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("event_type") == "check_result" and isinstance(ev.get("t_epoch"), (int, float)):
+            latest = ev["t_epoch"] if latest is None else max(latest, ev["t_epoch"])
+    return latest
+
+
+def _submission_mtime(work):
+    try:
+        st = os.lstat(work / "submission.json")
+    except OSError:
+        return None
+    return st.st_mtime if stat.S_ISREG(st.st_mode) else None
+
+
 def _wait(stack, ctx, work, manifest, log):
+    """submitted: submission.json exists and the agent ran ./check after writing it (then quiesce_seconds of
+    quiet), or it exists and the agent went idle for idle_seconds (review fix I3: the checker makes the
+    submission a precondition of a green check, so agents write it before they are done)."""
+    events_path = Path(work).parent / "events" / "events.jsonl"
     started = time.time()
     last_activity, last_requests, last_tree = started, 0, None
-    submitted_at = None
     while True:
         now = time.time()
         if now - started >= ctx.max_episode_seconds:
@@ -267,13 +304,17 @@ def _wait(stack, ctx, work, manifest, log):
         tree = tree_sha256(work) if work.exists() else None
         if stats["responses_ok"] != last_requests or tree != last_tree:
             last_activity, last_requests, last_tree = now, stats["responses_ok"], tree
-        if (work / "submission.json").exists():
-            submitted_at = submitted_at or now
-            if now - last_activity >= ctx.quiesce_seconds:
+        submitted = _submission_mtime(work)
+        if submitted is not None:
+            last_check = _last_check_epoch(events_path)
+            validated = last_check is not None and last_check >= submitted
+            quiet = now - last_activity
+            if (validated and quiet >= ctx.quiesce_seconds) or quiet >= ctx.idle_seconds:
+                manifest["submission_validated_by_check"] = validated
                 return "submitted"
         elif manifest.get("victim_started_at") and now - last_activity >= ctx.idle_seconds:
             return "idle"
-        time.sleep(2)
+        time.sleep(POLL_SECONDS)
 
 
 def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
