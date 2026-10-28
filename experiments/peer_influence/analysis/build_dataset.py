@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from peer_influence.attempts import parse_attempt
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from peer_influence.attempts import parse_attempt  # noqa: E402
 
 
 def _read(path):
