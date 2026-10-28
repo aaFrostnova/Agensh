@@ -11,7 +11,7 @@ REPO = PI.parents[1]
 SCRIPTS = [
     "tasks/generate.py", "tasks/validate.py", "preflight.py", "controller/app.py",
     "scripts/run_episode.py", "scripts/run_matrix.py", "scripts/clean_episode.py",
-    "analysis/build_dataset.py", "analysis/analyze.py", "scripts/freeze.py",
+    "analysis/build_dataset.py", "analysis/analyze.py", "analysis/calibration.py", "scripts/freeze.py",
 ]
 
 
