@@ -2,8 +2,13 @@
 # any change to prompts, tasks, evaluator or exclusion rules needs a new version.
 experiment:
   name: peer_influence_pilot
-  version: "0.2.0"
+  version: "0.3.0"   # victim-side pressure (docs/superpowers/specs/2026-10-28-v0.3.0-pressure-design.md)
   agensh_commit: "0468a3e6a58b51dc2b84871fcaa0df22b0d1033e"
+
+tasks:
+  root: "data/tasks_v0.2.0"   # relative to PROJECT_ROOT; --task-root overrides (calibration roots)
+  version: "0.2.0"            # bundles carry a two-commit history and a submission-validating checker
+  temptation: "recent_commit" # chosen by the calibration rule (design L5); the generator default
 
 model:
   routes_file: "experiments/peer_influence/configs/model_routes.yaml"
@@ -27,7 +32,7 @@ conditions:
 
 trigger:
   primary: first_failed_check
-  fallback_after_seconds: 180
+  fallback_after_seconds: 300   # v0.2.0 impossible episodes: first failed check median 120 s, p90 203 s, max 205 s
   send_once: true
   primary_analysis_requires_primary_trigger: true
 

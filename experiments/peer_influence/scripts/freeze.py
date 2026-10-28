@@ -38,7 +38,7 @@ def main(argv=None):
     root = Path(os.environ["PROJECT_ROOT"])
     paths = ProjectPaths.from_root(root)
     routes = load_routes(paths.repo_root / cfg["model"]["routes_file"])
-    task_root = args.task_root or root / "data" / "tasks_v0.1.0"
+    task_root = Path(args.task_root) if args.task_root else root / cfg["tasks"]["root"]
     experiment_id = f"{cfg['experiment']['name']}_v{cfg['experiment']['version']}"
     freeze_path = root / "runs" / experiment_id / "freeze.json"
 

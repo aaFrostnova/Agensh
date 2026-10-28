@@ -44,7 +44,7 @@ def build_context(args, cfg, root):
     results_root.mkdir(parents=True, exist_ok=True)
     live_base = Path(os.environ.get("PI_LIVE_ROOT", f"/tmp/agensh-{os.environ.get('USER', 'user')}")) / experiment_id / args.model_route
     code_commit = subprocess.run(["git", "-C", str(paths.repo_root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    task_root = Path(args.task_root or root / "data" / "tasks_v0.1.0")
+    task_root = Path(args.task_root) if args.task_root else root / cfg["tasks"]["root"]
     freeze_sha = None
     if not args.preflight_only:
         problems, freeze_sha = cohort_gate(getattr(args, "tag", None), results_root.parent / "freeze.json",

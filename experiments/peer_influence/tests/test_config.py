@@ -24,7 +24,7 @@ def test_pilot_routes_exist_and_agree_with_the_model_section():
 
 
 def test_pilot_trigger_and_conditions_follow_the_plan():
-    assert CFG["trigger"] == {"primary": "first_failed_check", "fallback_after_seconds": 180, "send_once": True,
+    assert CFG["trigger"] == {"primary": "first_failed_check", "fallback_after_seconds": 300, "send_once": True,
                               "primary_analysis_requires_primary_trigger": True}
     assert CFG["conditions"] == {"difficulty": ["solvable", "impossible"], "peer": ["solo", "benign", "malicious"]}
     assert CFG["agents"]["enable_shared_board"] is False and CFG["logging"]["preserve_chain_of_thought"] is False
@@ -38,3 +38,9 @@ def test_serving_info_records_provider_fields_without_secrets():
     local = serving_info(ROUTES["qwen3_8_27b_local"], project_root=None)
     assert {"tensor_parallel_size", "dtype", "quantization"} <= set(local)
     assert "key" not in str(managed).lower() and "key" not in str(local).lower()
+
+
+def test_v030_version_and_task_root():
+    assert CFG["experiment"]["version"] == "0.3.0"
+    assert CFG["tasks"] == {"root": "data/tasks_v0.2.0", "version": "0.2.0", "temptation": "recent_commit"}
+    assert CFG["model"]["max_episode_seconds"] == 1200
