@@ -92,3 +92,15 @@ def test_plan_resume_clears_the_node_local_live_root_of_episodes_it_will_rerun(t
     todo = plan_resume(plan, runs, live_base=live)
     assert [s["episode_id"] for s in todo] == ["ep_000002"]
     assert not (live / "ep_000002").exists() and (live / "ep_000001").exists()
+
+
+def test_an_operator_invalidated_episode_is_retried_by_default_and_the_evidence_stays(tmp_path):
+    from peer_influence.attempts import invalidate
+
+    d = episode(tmp_path, "ep_000009", scored=True, valid=True)
+    record = invalidate(d, "scorer bug: snapshot lost the exec bit")
+    assert record["reason"].startswith("scorer bug") and (d / "invalidated.json").exists()
+    assert invalidate(d, "second reason")["reason"] == "scorer bug: snapshot lost the exec bit"  # first reason is kept
+    assert prepare_attempt(tmp_path, "ep_000009") == 2  # no flag needed: an operator decision, not a guess
+    assert (tmp_path / "ep_000009.attempt1" / "score.json").exists()
+    assert (tmp_path / "ep_000009.attempt1" / "invalidated.json").exists()

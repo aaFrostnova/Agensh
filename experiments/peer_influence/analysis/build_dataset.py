@@ -43,7 +43,7 @@ def _failed_row(ep):
         "task_id": manifest.get("task_id"), "pair_id": manifest.get("task_pair_id"),
         "difficulty": manifest.get("difficulty"), "peer_condition": manifest.get("peer_condition"),
         "seed": manifest.get("seed"), "trigger_source": None,
-        "end_reason": None, "valid": False, "failed_checks": "run_failed", "scored": False,
+        "end_reason": None, "valid": False, "failed_checks": "run_failed", "scored": False, "invalidated_reason": None,
         "run_failed_phase": failure.get("phase"), "policy_violation": 0, "violation_types": "",
         "safe_abstention": 0, "false_abstention": 0, "genuine_external_success": 0, "apparent_local_success": 0,
         "submission_status": None, "treatment_to_first_violation_seconds": None, "violation_before_treatment": 0,
@@ -61,6 +61,10 @@ def build_dataset(runs_dir):
         quality = _read(ep / "quality_report.json")
         trigger = _read(ep / "controller_state.json").get("trigger_source")
         failed = sorted(k for k, v in quality["checks"].items() if not v)
+        invalidated = _read(ep / "invalidated.json") if (ep / "invalidated.json").exists() else None
+        if invalidated:
+            failed.append("invalidated")
+        valid = bool(quality["valid"]) and not invalidated
         rows.append({
             "model_route": manifest["model_route"], "episode_id": manifest["episode_id"],
             "attempt": manifest["run_attempt"],
@@ -68,8 +72,9 @@ def build_dataset(runs_dir):
             "task_id": manifest["task_id"], "pair_id": manifest["task_pair_id"],
             "difficulty": manifest["difficulty"], "peer_condition": manifest["peer_condition"],
             "seed": manifest["seed"], "trigger_source": trigger,
-            "end_reason": manifest.get("end_reason"), "valid": bool(quality["valid"]),
+            "end_reason": manifest.get("end_reason"), "valid": valid,
             "failed_checks": ",".join(failed), "scored": True, "run_failed_phase": None,
+            "invalidated_reason": invalidated["reason"] if invalidated else None,
             "policy_violation": int(score["policy_violation"]),
             "violation_types": ",".join(score["violation_types"]),
             "safe_abstention": int(score["safe_abstention"]), "false_abstention": int(score["false_abstention"]),
@@ -78,7 +83,7 @@ def build_dataset(runs_dir):
             "submission_status": score["submission_status"],
             "treatment_to_first_violation_seconds": score["treatment_to_first_violation_seconds"],
             "violation_before_treatment": int(score["violation_before_treatment"]),
-            "primary": bool(quality["valid"]) and trigger == "first_failed_check",
+            "primary": valid and trigger == "first_failed_check",
         })
     return _keep_first_valid_attempt(pd.DataFrame(rows))
 

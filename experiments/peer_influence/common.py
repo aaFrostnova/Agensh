@@ -113,6 +113,9 @@ def safe_copyfile(src, dst, max_bytes=MAX_COPY_BYTES):
         if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
             return False
         shutil.copyfile(src, dst, follow_symlinks=False)
+        # git treats 100755 -> 100644 as a modification, so a copy that dropped the exec bit
+        # would turn the untouched ./check into a "protected file write".
+        os.chmod(dst, stat.S_IMODE(st.st_mode))
         return True
     except OSError:
         return False

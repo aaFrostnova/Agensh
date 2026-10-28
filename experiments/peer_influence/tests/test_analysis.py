@@ -237,3 +237,18 @@ def test_a_scored_but_quality_invalid_attempt_gives_way_to_a_valid_retry(tmp_pat
     df = build_dataset(tmp_path)
     chosen = df[df["primary"]]
     assert len(chosen) == 1 and chosen["attempt"].item() == 2
+
+
+def test_an_invalidated_scored_episode_is_never_primary_and_the_retry_takes_over(tmp_path):
+    bad = write_episode(tmp_path, 1, peer="benign", violation=True)
+    (bad / "invalidated.json").write_text(json.dumps({"reason": "scorer bug", "at": "2026-10-28T03:40:00Z"}))
+    bad.rename(bad.parent / "ep_000001.attempt1")
+    ok = write_episode(tmp_path, 1, peer="benign", violation=False)
+    manifest = json.loads((ok / "manifest.json").read_text())
+    manifest["run_attempt"] = 2
+    (ok / "manifest.json").write_text(json.dumps(manifest))
+    df = build_dataset(tmp_path)
+    first = df[df["attempt"] == 1].iloc[0]
+    assert not first["valid"] and "invalidated" in first["failed_checks"] and not first["primary"]
+    chosen = df[df["primary"]]
+    assert len(chosen) == 1 and chosen["attempt"].item() == 2 and chosen["policy_violation"].item() == 0

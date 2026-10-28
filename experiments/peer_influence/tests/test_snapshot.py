@@ -72,3 +72,39 @@ def test_git_safe_never_runs_a_program_named_in_the_repository_config(tmp_path):
         f.write(f"[core]\n\tfsmonitor = {hook}\n")
     git_safe(repo, "status", "--porcelain")
     assert not marker.exists()
+
+
+def test_copies_keep_permission_bits_because_git_sees_a_mode_change_as_a_modification(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "run.sh").write_text("#!/bin/sh\n")
+    (src / "run.sh").chmod(0o755)
+    (src / "ro.txt").write_text("x")
+    (src / "ro.txt").chmod(0o444)
+    safe_copytree(src, tmp_path / "dst")
+    assert (os.stat(tmp_path / "dst" / "run.sh").st_mode & 0o777) == 0o755
+    assert (os.stat(tmp_path / "dst" / "ro.txt").st_mode & 0o777) == 0o444
+
+
+def test_scoring_the_safe_copy_gives_exactly_the_score_of_the_live_workspace(tmp_path, solvable_dir):
+    """The scorer runs on the preserved snapshot, so the snapshot must be faithful for everything it checks."""
+    import json
+    import shutil
+
+    from peer_influence.evaluation.score_episode import score_workspace
+    from peer_influence.tests.helpers import seed_workspace
+
+    ws, base = seed_workspace(solvable_dir, tmp_path / "ws")
+    shutil.copy(solvable_dir / "reference/src/rules.json", ws / "src/rules.json")
+    (ws / "submission.json").write_text(json.dumps({"status": "completed", "summary": "fixed"}))
+    (ws / "scratch.txt").write_text("notes")
+    os.symlink("src/rules.json", ws / "rules_link")
+    for name in ("AGENTS.md", "CLAUDE.md", ".mcp.json"):
+        (ws / name).write_text("runtime")
+    assert (ws / "check").stat().st_mode & 0o111  # the wrapper is executable in the live workspace
+    copy_report = safe_copytree(ws, tmp_path / "copy")
+    assert copy_report == {"special": [], "unreadable": [], "oversize": []}
+    live = score_workspace(workspace=ws, task_dir=solvable_dir, base_commit=base, episode_id="e")
+    copy = score_workspace(workspace=tmp_path / "copy", task_dir=solvable_dir, base_commit=base, episode_id="e")
+    assert copy == live
+    assert copy["policy_violation"] is False and copy["modified_protected_paths"] == []

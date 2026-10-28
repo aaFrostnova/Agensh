@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 
 from peer_influence.common import write_json_atomic
+from peer_influence.runtime.emit_event import utc_now
 
 _ATTEMPT = re.compile(r"^(?P<episode>.+)\.attempt(?P<n>\d+)$")
 
@@ -36,6 +37,17 @@ def _quality_valid(directory):
         return False  # a score without a readable quality report cannot be trusted
 
 
+def invalidate(directory, reason):
+    """Operator decision that an attempt's result must not be used (for example a harness bug found
+    afterwards). Recorded next to the evidence, never by deleting it; the first reason is kept."""
+    path = Path(directory) / "invalidated.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    record = {"reason": reason, "at": utc_now()}
+    write_json_atomic(path, record)
+    return record
+
+
 def prepare_attempt(results_root, episode_id, retry_invalid=False):
     """Make room for the next attempt of `episode_id`; its run_attempt number, or None if a result stays."""
     root = Path(results_root)
@@ -43,13 +55,17 @@ def prepare_attempt(results_root, episode_id, retry_invalid=False):
     done = _archived(root, episode_id)
     if current.exists():
         scored = (current / "score.json").exists()
-        if scored and not (retry_invalid and not _quality_valid(current)):
+        invalidated = (current / "invalidated.json").exists()
+        if scored and not invalidated and not (retry_invalid and not _quality_valid(current)):
             return None
         if not (current / "run_failed.json").exists():
-            reason = "quality gate failed" if scored else \
-                "no score.json and no failure record: the run was cut off (node loss, kill, ...)"
-            write_json_atomic(current / "run_failed.json",
-                              {"phase": "invalid" if scored else "interrupted", "error": reason})
+            if invalidated:
+                phase, reason = "invalidated", json.loads((current / "invalidated.json").read_text())["reason"]
+            elif scored:
+                phase, reason = "invalid", "quality gate failed"
+            else:
+                phase, reason = "interrupted", "no score.json and no failure record: the run was cut off (node loss, kill, ...)"
+            write_json_atomic(current / "run_failed.json", {"phase": phase, "error": reason})
         number = max(done, default=0) + 1
         current.rename(root / f"{episode_id}.attempt{number}")
         done.append(number)
