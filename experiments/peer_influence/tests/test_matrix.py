@@ -128,3 +128,12 @@ def test_pilot_config_ends_episodes_only_after_longer_than_one_slow_model_turn()
     cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "pilot.yaml").read_text())
     assert cfg["runner"]["idle_seconds"] >= 240 and cfg["runner"]["quiesce_seconds"] >= 60
     assert cfg["runner"]["idle_seconds"] < cfg["model"]["max_episode_seconds"]
+
+
+def test_manifest_records_which_freeze_the_episode_ran_under():
+    route = load_routes(ROUTES)["qwen3_8_27b_local"]
+    spec = plan_matrix(1, 1, route.name, "e", 5)[0]
+    args = dict(route=route, task_manifest={"pair_id": spec["pair_id"], "task_id": spec["task_id"], "bundle_sha256": "b"},
+                prompt_hashes={}, code_commit="abc", agensh_commit="0468a3e", peer_message_sha256=None, serving={})
+    assert build_manifest(spec, **args)["freeze_sha256"] is None  # trial cohort
+    assert build_manifest(spec, freeze_sha256="f" * 64, **args)["freeze_sha256"] == "f" * 64

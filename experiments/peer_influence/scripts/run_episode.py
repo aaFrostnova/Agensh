@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import yaml  # noqa: E402
 
+from peer_influence.freeze import cohort_gate  # noqa: E402
 from peer_influence.preflight import run_preflight  # noqa: E402
 from peer_influence.routes import load_routes, load_secret_env  # noqa: E402
 from peer_influence.runner import RunContext, run_episode  # noqa: E402
@@ -34,7 +35,8 @@ def project_root():
 def build_context(args, cfg, root):
     paths = ProjectPaths.from_root(root)
     routes_file = paths.repo_root / cfg["model"]["routes_file"]
-    route = load_routes(routes_file)[args.model_route]
+    routes = load_routes(routes_file)
+    route = routes[args.model_route]
     secret_file = root / "secrets" / ("qwen_local.env" if route.deployment == "local_vllm" else "bedrock.env")
     api_key = load_secret_env(secret_file)[route.api_key_env]
     experiment_id = f"{cfg['experiment']['name']}_v{cfg['experiment']['version']}" + (f"-{args.tag}" if getattr(args, "tag", None) else "")
@@ -42,18 +44,25 @@ def build_context(args, cfg, root):
     results_root.mkdir(parents=True, exist_ok=True)
     live_base = Path(os.environ.get("PI_LIVE_ROOT", f"/tmp/agensh-{os.environ.get('USER', 'user')}")) / experiment_id / args.model_route
     code_commit = subprocess.run(["git", "-C", str(paths.repo_root), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    task_root = Path(args.task_root or root / "data" / "tasks_v0.1.0")
+    freeze_sha = None
+    if not args.preflight_only:
+        problems, freeze_sha = cohort_gate(getattr(args, "tag", None), results_root.parent / "freeze.json",
+                                           paths.repo_root, task_root, routes, args.model_route)
+        if problems:
+            sys.exit("FATAL: not a valid formal cohort (plan 15.3):\n  " + "\n  ".join(problems))
     r = cfg["runner"]
     # Always fresh: the quality gate's preflight evidence must describe this endpoint now.
     preflight = run_preflight(route, route.upstream_url, api_key)
     (results_root / "preflight.json").write_text(json.dumps(preflight, indent=2, sort_keys=True))
     return RunContext(
         paths=paths, route=route, routes_file=routes_file, api_key=api_key, experiment_id=experiment_id,
-        task_root=Path(args.task_root or root / "data" / "tasks_v0.1.0"), prompts_dir=paths.repo_root / "experiments/peer_influence/prompts",
+        task_root=task_root, prompts_dir=paths.repo_root / "experiments/peer_influence/prompts",
         results_root=results_root, live_base=live_base, preflight=preflight, serving=serving_info(route, root),
         code_commit=code_commit, agensh_commit=cfg["experiment"]["agensh_commit"],
         max_episode_seconds=cfg["model"]["max_episode_seconds"], fallback_after_seconds=cfg["trigger"]["fallback_after_seconds"],
         idle_seconds=r["idle_seconds"], quiesce_seconds=r["quiesce_seconds"], shutdown_seconds=r["shutdown_seconds"],
-        keep_live=args.keep_live, log=lambda m: print(m, flush=True))
+        keep_live=args.keep_live, freeze_sha256=freeze_sha, log=lambda m: print(m, flush=True))
 
 
 def main(argv=None):

@@ -71,6 +71,23 @@ original id as attempt k+1; `--retry-invalid` additionally retries scored episod
 gate only looks at infrastructure evidence, never at the outcome; valid results are never re-run). The dataset
 keeps the first valid attempt of each episode as the primary one and counts every attempt in the exclusion report.
 
+### Formal cohorts are frozen (plan 13.4, 15.3)
+
+`--tag NAME` marks a trial cohort (its own experiment id, no freeze). A cohort without `--tag` is formal: it refuses to
+start unless `runs/<experiment_id>/freeze.json` exists and the frozen inputs are unchanged. Create it once, after the
+smoke passes and everything is committed:
+
+```bash
+$PY experiments/peer_influence/scripts/freeze.py create --config experiments/peer_influence/configs/pilot.yaml
+```
+
+It requires the frozen paths to be committed, all tasks to pass their validity gates and the two treatment messages to
+match, writes the freeze (write-once) and tags the commit `freeze/<experiment_id>`. Every manifest records the hash of
+the freeze file. Frozen: prompts, task set, configs, the harness code that generates or labels episodes, the
+primary-inclusion rule (`analysis/build_dataset.py`) and the upstream runtime files. Not frozen: analysis statistics, docs,
+tests. A needed change means a new `experiment.version` in `pilot.yaml`, a new freeze and a new runs directory; one freeze
+serves every route (Qwen and Kimi) of that version. `freeze.py verify --model-route R` lists what changed.
+
 ### Treatment messages are an external input
 
 `run_matrix.py` and `run_episode.py` load `prompts/peer_<condition>.txt`, record its SHA-256 in every manifest and

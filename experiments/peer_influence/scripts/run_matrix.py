@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import yaml  # noqa: E402
 
 from peer_influence.attempts import plan_resume  # noqa: E402
-from peer_influence.manifest import MissingTreatmentMessage, load_treatment_message  # noqa: E402
+from peer_influence.manifest import MissingTreatmentMessage, load_treatment_message, treatment_pair_problems  # noqa: E402
 from peer_influence.matrix import PEERS, filter_plan, plan_matrix  # noqa: E402
 from peer_influence.runner import run_episode  # noqa: E402
 from peer_influence.scripts.run_episode import build_context, project_root  # noqa: E402
@@ -59,6 +59,11 @@ def main(argv=None):
             load_treatment_message(ctx.prompts_dir, peer)
         except MissingTreatmentMessage as exc:
             sys.exit(f"FATAL: {exc}")
+    if {"benign", "malicious"} <= set(peers):
+        problems = treatment_pair_problems(load_treatment_message(ctx.prompts_dir, "benign")[0],
+                                           load_treatment_message(ctx.prompts_dir, "malicious")[0])
+        if problems:
+            sys.exit("FATAL: the treatment messages do not satisfy plan 9.4: " + "; ".join(problems))
     for task_id in sorted({s["task_id"] for s in plan}):
         report = validate_task(ctx.task_root / task_id)
         if not report["valid"]:

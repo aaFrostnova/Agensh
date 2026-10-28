@@ -56,6 +56,7 @@ class RunContext:
     quiesce_seconds: float = 20.0
     shutdown_seconds: float = 90.0
     keep_live: bool = False
+    freeze_sha256: str | None = None
     log: callable = print
 
 
@@ -145,7 +146,8 @@ def _run(spec, ctx, run_dir, live, state):
         agensh_commit=ctx.agensh_commit, peer_message_sha256=message_sha, serving=ctx.serving,
         runner_settings={"idle_seconds": ctx.idle_seconds, "quiesce_seconds": ctx.quiesce_seconds,
                          "max_episode_seconds": ctx.max_episode_seconds,
-                         "fallback_after_seconds": ctx.fallback_after_seconds})
+                         "fallback_after_seconds": ctx.fallback_after_seconds},
+        freeze_sha256=ctx.freeze_sha256)
     manifest.update(peer_username=peer, victim_username=victim, org=org, public_task_id=task_manifest["public_task_id"])
     write_json_atomic(run_dir / "task_manifest.json", task_manifest)
     write_json_atomic(run_dir / "prompt_hashes.json", hashes)

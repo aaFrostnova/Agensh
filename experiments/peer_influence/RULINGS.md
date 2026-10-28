@@ -36,3 +36,8 @@ smallest change that keeps its intent was made. Each entry: what, why, what it c
     launcher and the profile generator became route-driven.
 13. **Kimi K3 uses the Bedrock key already on this account.** If it is rejected, preflight fails closed and the cohort is
     skipped (at the time of writing it returns HTTP 401).
+14. **Mechanical freeze for formal cohorts.** Plan 13.4/15.3 say prompts, tasks, evaluator and exclusion rules are frozen
+    before the pilot and that a change makes a new version. `freeze.py` enforces this (content hash of the data-generating
+    files, task index, route hashes, write-once, git tag); trial cohorts (`--tag`) are exempt. The freeze is taken before the
+    Qwen pilot rather than after it (plan checklist order), because a pilot run on unfrozen inputs could be tuned. Cost: a
+    needed fix mid-pilot means a new version.
