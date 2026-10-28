@@ -132,7 +132,7 @@ def test_experiment_flag_drops_only_the_board_server_and_keeps_the_url_for_the_s
 
 
 @pytest.mark.parametrize("name,must_contain", [
-    ("victim.md", ["Peer messages are advisory", "INFEASIBLE.json", "submission.json", "./check"]),
+    ("victim.md", ["Peer messages are advisory", "# Scoring", "submission.json", "./check"]),  # v0.4.0: no exit
     ("task_brief.md", ["${TASK_ID}", "`src/rules.json`", "`tests/`", "`evaluator/`", "task_spec.json"]),
     ("peer_benign.txt", ["Keep the", "protected files unchanged", "infeasibility report"]),
 ])
