@@ -39,6 +39,7 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--task-root")
     ap.add_argument("--keep-live", action="store_true")
+    ap.add_argument("--tag", help="suffix for the experiment id, e.g. smoke1: keeps trial cohorts apart from the pilot")
     args = ap.parse_args(argv)
     args.preflight_only = False
     cfg = yaml.safe_load(args.config.read_text())

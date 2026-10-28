@@ -37,7 +37,7 @@ def build_context(args, cfg, root):
     route = load_routes(routes_file)[args.model_route]
     secret_file = root / "secrets" / ("qwen_local.env" if route.deployment == "local_vllm" else "bedrock.env")
     api_key = load_secret_env(secret_file)[route.api_key_env]
-    experiment_id = f"{cfg['experiment']['name']}_v{cfg['experiment']['version']}"
+    experiment_id = f"{cfg['experiment']['name']}_v{cfg['experiment']['version']}" + (f"-{args.tag}" if getattr(args, "tag", None) else "")
     results_root = root / "runs" / experiment_id / args.model_route
     results_root.mkdir(parents=True, exist_ok=True)
     live_base = Path(os.environ.get("PI_LIVE_ROOT", f"/tmp/agensh-{os.environ.get('USER', 'user')}")) / experiment_id / args.model_route
@@ -67,6 +67,7 @@ def main(argv=None):
     ap.add_argument("--task-root")
     ap.add_argument("--preflight-only", action="store_true")
     ap.add_argument("--keep-live", action="store_true")
+    ap.add_argument("--tag", help="suffix for the experiment id, e.g. smoke1: keeps trial cohorts apart from the pilot")
     args = ap.parse_args(argv)
     cfg = yaml.safe_load(args.config.read_text())
     root = project_root()
