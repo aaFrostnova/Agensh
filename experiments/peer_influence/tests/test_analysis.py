@@ -181,3 +181,59 @@ def test_end_reasons_are_reported_and_a_submitted_only_sensitivity_is_given(tmp_
     assert model["end_reasons"] == {"idle": 2, "submitted": 6}
     sens = summary["sensitivity_submitted_only"]["qwen"]
     assert sens["h2_malicious_minus_solo"]["n_a"] == 3 and sens["h2_malicious_minus_solo"]["n_b"] == 3
+
+
+def write_attempt(root, name, **kw):
+    """An attempt directory named like the runner archives it (<episode>.attempt<k>)."""
+    n = kw.pop("n")
+    d = write_episode(root, n, **kw)
+    d.rename(d.parent / name)
+    return d.parent / name
+
+
+def test_first_valid_attempt_is_the_one_analysed_and_failed_attempts_are_counted(tmp_path):
+    failed = tmp_path / "qwen" / "ep_000001.attempt1"
+    failed.mkdir(parents=True)
+    (failed / "run_failed.json").write_text(json.dumps({"phase": "interrupted", "error": "cut off"}))
+    (failed / "manifest.json").write_text(json.dumps({
+        "experiment_id": "x", "route_hash": "h1", "episode_id": "ep_000001", "model_route": "qwen",
+        "task_id": "mapping_000_impossible", "task_pair_id": "mapping_000", "difficulty": "impossible",
+        "peer_condition": "benign", "seed": 1, "run_attempt": 1}))
+    ok = write_episode(tmp_path, 1, peer="benign", violation=True)
+    manifest = json.loads((ok / "manifest.json").read_text())
+    manifest["run_attempt"] = 2
+    (ok / "manifest.json").write_text(json.dumps(manifest))
+    df = build_dataset(tmp_path)
+    assert sorted(df["attempt"]) == [1, 2] and set(df["episode_id"]) == {"ep_000001"}
+    assert df[df["attempt"] == 2]["primary"].item() and not df[df["attempt"] == 1]["primary"].item()
+    rep = exclusion_report(df)
+    assert (rep["n_episodes"], rep["n_attempts"], rep["n_retried"], rep["n_primary"]) == (1, 2, 1, 1)
+
+
+def test_a_later_retry_never_replaces_a_valid_first_attempt(tmp_path):
+    write_episode(tmp_path, 1, peer="benign", violation=False)
+    write_attempt(tmp_path, "ep_000001.attempt2", n=2, peer="benign", violation=True)
+    # the second directory claims to be a retry of episode 1
+    d = tmp_path / "qwen" / "ep_000001.attempt2"
+    manifest = json.loads((d / "manifest.json").read_text())
+    manifest.update(episode_id="ep_000001", run_attempt=2)
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    df = build_dataset(tmp_path)
+    chosen = df[df["primary"]]
+    assert len(chosen) == 1 and chosen["attempt"].item() == 1 and chosen["policy_violation"].item() == 0
+
+
+def test_a_scored_but_quality_invalid_attempt_gives_way_to_a_valid_retry(tmp_path):
+    write_attempt(tmp_path, "ep_000001.attempt1", n=1, peer="benign", violation=True, valid=False,
+                  failing=("treatment_delivered",))
+    d = tmp_path / "qwen" / "ep_000001.attempt1"
+    manifest = json.loads((d / "manifest.json").read_text())
+    manifest.update(episode_id="ep_000001", run_attempt=1)
+    (d / "manifest.json").write_text(json.dumps(manifest))
+    ok = write_episode(tmp_path, 1, peer="benign", violation=False)
+    manifest = json.loads((ok / "manifest.json").read_text())
+    manifest["run_attempt"] = 2
+    (ok / "manifest.json").write_text(json.dumps(manifest))
+    df = build_dataset(tmp_path)
+    chosen = df[df["primary"]]
+    assert len(chosen) == 1 and chosen["attempt"].item() == 2

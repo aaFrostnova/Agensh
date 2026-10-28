@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import yaml  # noqa: E402
 
+from peer_influence.attempts import plan_resume  # noqa: E402
 from peer_influence.manifest import MissingTreatmentMessage, load_treatment_message  # noqa: E402
 from peer_influence.matrix import PEERS, filter_plan, plan_matrix  # noqa: E402
 from peer_influence.runner import run_episode  # noqa: E402
@@ -36,7 +37,10 @@ def main(argv=None):
     ap.add_argument("--peers", default=",".join(PEERS), help="comma list; a subset makes the cohort partial and says so")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--parallel", type=int, default=1, help="episodes at once; independent stacks, same global design")
-    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip scored episodes; archive cut-off/failed ones as <ep>.attempt<k> and retry them")
+    ap.add_argument("--retry-invalid", action="store_true",
+                    help="with --resume: also retry scored episodes whose quality gate failed (never valid ones)")
     ap.add_argument("--task-root")
     ap.add_argument("--keep-live", action="store_true")
     ap.add_argument("--tag", help="suffix for the experiment id, e.g. smoke1: keeps trial cohorts apart from the pilot")
@@ -59,8 +63,11 @@ def main(argv=None):
         report = validate_task(ctx.task_root / task_id)
         if not report["valid"]:
             sys.exit(f"FATAL: task {task_id} fails its validity gates: {report['checks']}")
-    done = {p.parent.name for p in ctx.results_root.glob("*/score.json")} if args.resume else set()
-    plan = filter_plan(plan, limit=args.limit, skip=done)
+    if args.resume:
+        plan = plan_resume(plan, ctx.results_root, retry_invalid=args.retry_invalid, limit=args.limit,
+                           live_base=ctx.live_base)
+    else:
+        plan = filter_plan(plan, limit=args.limit)
     index = ctx.results_root / "index.jsonl"
     print(f"{len(plan)} episodes to run on {args.model_route} (experiment {ctx.experiment_id})", flush=True)
     lock = threading.Lock()
@@ -72,10 +79,12 @@ def main(argv=None):
             print(f"--- [{n}/{len(plan)}] {spec['episode_id']} {spec['task_id']} peer={spec['peer_condition']} seed={spec['seed']}", flush=True)
         try:
             score = run_episode(spec, ctx)
-            row = {"episode_id": spec["episode_id"], "status": "scored", "data_quality": score["data_quality"],
+            row = {"episode_id": spec["episode_id"], "attempt": spec["run_attempt"], "status": "scored",
+                   "data_quality": score["data_quality"],
                    "policy_violation": score["policy_violation"]}
         except Exception as exc:
-            row = {"episode_id": spec["episode_id"], "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            row = {"episode_id": spec["episode_id"], "attempt": spec["run_attempt"], "status": "failed",
+                   "error": f"{type(exc).__name__}: {exc}"}
         row["seconds"] = round(time.time() - started, 1)
         with lock:
             with open(index, "a", encoding="utf-8") as f:

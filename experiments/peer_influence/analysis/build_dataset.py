@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from peer_influence.attempts import parse_attempt
+
 
 def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -34,11 +36,13 @@ def _failed_row(ep):
     failure = _read(ep / "run_failed.json")
     manifest = _read(ep / "manifest.json") if (ep / "manifest.json").exists() else {}
     return {
-        "model_route": manifest.get("model_route", ep.parent.name), "episode_id": manifest.get("episode_id", ep.name),
+        "model_route": manifest.get("model_route", ep.parent.name),
+        "episode_id": manifest.get("episode_id", parse_attempt(ep.name)[0]),
+        "attempt": manifest.get("run_attempt") or parse_attempt(ep.name)[1] or 1,
         "experiment_id": manifest.get("experiment_id"), "route_hash": manifest.get("route_hash"),
         "task_id": manifest.get("task_id"), "pair_id": manifest.get("task_pair_id"),
         "difficulty": manifest.get("difficulty"), "peer_condition": manifest.get("peer_condition"),
-        "seed": manifest.get("seed"), "run_attempt": manifest.get("run_attempt"), "trigger_source": None,
+        "seed": manifest.get("seed"), "trigger_source": None,
         "end_reason": None, "valid": False, "failed_checks": "run_failed", "scored": False,
         "run_failed_phase": failure.get("phase"), "policy_violation": 0, "violation_types": "",
         "safe_abstention": 0, "false_abstention": 0, "genuine_external_success": 0, "apparent_local_success": 0,
@@ -59,10 +63,11 @@ def build_dataset(runs_dir):
         failed = sorted(k for k, v in quality["checks"].items() if not v)
         rows.append({
             "model_route": manifest["model_route"], "episode_id": manifest["episode_id"],
+            "attempt": manifest["run_attempt"],
             "experiment_id": manifest.get("experiment_id"), "route_hash": manifest.get("route_hash"),
             "task_id": manifest["task_id"], "pair_id": manifest["task_pair_id"],
             "difficulty": manifest["difficulty"], "peer_condition": manifest["peer_condition"],
-            "seed": manifest["seed"], "run_attempt": manifest["run_attempt"], "trigger_source": trigger,
+            "seed": manifest["seed"], "trigger_source": trigger,
             "end_reason": manifest.get("end_reason"), "valid": bool(quality["valid"]),
             "failed_checks": ",".join(failed), "scored": True, "run_failed_phase": None,
             "policy_violation": int(score["policy_violation"]),
@@ -75,14 +80,32 @@ def build_dataset(runs_dir):
             "violation_before_treatment": int(score["violation_before_treatment"]),
             "primary": bool(quality["valid"]) and trigger == "first_failed_check",
         })
-    return pd.DataFrame(rows)
+    return _keep_first_valid_attempt(pd.DataFrame(rows))
+
+
+def _keep_first_valid_attempt(df):
+    """Plan 15.1: only the first complete attempt of an episode can be primary. A later retry never
+    replaces a valid earlier attempt, so re-running cannot be used to pick results."""
+    if df.empty:
+        return df
+    selected = set()
+    for _, group in df.groupby(["model_route", "episode_id"], sort=False):
+        valid = group[group["valid"]].sort_values("attempt")
+        if len(valid):
+            selected.add(valid.index[0])
+    df = df.copy()
+    df["primary"] = df["primary"] & df.index.isin(selected)
+    return df
 
 
 def exclusion_report(df):
     invalid = df[~df["valid"]]
     counts = Counter(c for cell in invalid["failed_checks"] for c in cell.split(",") if c)
+    unique = df.drop_duplicates(["model_route", "episode_id"])
     return {
-        "n_episodes": int(len(df)), "n_primary": int(df["primary"].sum()), "n_invalid": int(len(invalid)),
+        "n_episodes": int(len(unique)), "n_attempts": int(len(df)),
+        "n_retried": int((df.groupby(["model_route", "episode_id"]).size() > 1).sum()),
+        "n_primary": int(df["primary"].sum()), "n_invalid": int(len(invalid)),
         "invalid_by_check": dict(sorted(counts.items())),
         "n_run_failed": int((~df["scored"]).sum()),
         "run_failed_by_phase": dict(sorted(Counter(df.loc[~df["scored"], "run_failed_phase"].fillna("unknown")).items())),
