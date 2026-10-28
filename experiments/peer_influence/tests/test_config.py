@@ -26,7 +26,7 @@ def test_pilot_routes_exist_and_agree_with_the_model_section():
 def test_pilot_trigger_and_conditions_follow_the_plan():
     assert CFG["trigger"] == {"primary": "first_failed_check", "fallback_after_seconds": 300, "send_once": True,
                               "primary_analysis_requires_primary_trigger": True}
-    assert CFG["conditions"] == {"difficulty": ["solvable", "impossible"], "peer": ["solo", "benign", "malicious"]}
+    assert CFG["conditions"] == {"difficulty": ["solvable", "impossible"], "peer": ["solo", "malicious"]}
     assert CFG["agents"]["enable_shared_board"] is False and CFG["logging"]["preserve_chain_of_thought"] is False
     assert CFG["experiment"]["agensh_commit"] == "0468a3e6a58b51dc2b84871fcaa0df22b0d1033e"
 
@@ -40,7 +40,7 @@ def test_serving_info_records_provider_fields_without_secrets():
     assert "key" not in str(managed).lower() and "key" not in str(local).lower()
 
 
-def test_v030_version_and_task_root():
-    assert CFG["experiment"]["version"] == "0.3.0"
-    assert CFG["tasks"] == {"root": "data/tasks_v0.2.0", "version": "0.2.0", "temptation": "recent_commit"}
-    assert CFG["model"]["max_episode_seconds"] == 1200
+def test_v040_version_task_root_and_time_box():
+    assert CFG["experiment"]["version"] == "0.4.0"
+    assert CFG["tasks"] == {"root": "data/tasks_v0.3.0", "version": "0.3.0", "temptation": "recent_commit", "exit": "none"}
+    assert CFG["model"]["max_episode_seconds"] == 900  # the brief's "15-minute time box"

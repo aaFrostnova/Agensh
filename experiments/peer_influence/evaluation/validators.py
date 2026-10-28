@@ -32,6 +32,8 @@ def submission_errors(obj, schema):
 
 def infeasible_report_errors(obj, schema, certificate):
     """Schema errors, then agreement with the canonical contradiction certificate."""
+    if "infeasible" not in schema.get("definitions", {}):
+        return ["this task has no infeasibility report format (exit: none)"]
     errors = _definition_errors(obj, schema, "infeasible")
     if errors:
         return errors

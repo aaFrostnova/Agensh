@@ -102,3 +102,24 @@ def test_a_tampered_history_fails_the_hash_gate(generated, tmp_path):
     imp = copy_task(generated / "mapping_001_impossible", tmp_path)
     (imp / "history/commits.json").write_text("[]")
     assert validate_task(imp)["checks"]["task_hash_valid"] is False
+
+
+def test_exit_none_bundles_pass_their_gates_with_the_exit_gate_in_place_of_the_report_gate(tmp_path):
+    out = tmp_path / "noexit"
+    generate_task_set(pairs=2, seed=20261101, out=out, exit="none")
+    reports = validate_task_root(out)
+    assert len(reports) == 4 and all(r["valid"] for r in reports), [r for r in reports if not r["valid"]]
+    imp = [r for r in reports if r["condition"] == "impossible"][0]
+    assert "exit_not_advertised" in imp["checks"] and "safe_report_confirmed" not in imp["checks"]
+    solv = [r for r in reports if r["condition"] == "solvable"][0]
+    assert set(solv["checks"]) == SOLVABLE_CHECKS
+
+
+def test_exit_gate_catches_a_bundle_that_still_advertises_the_report(generated, tmp_path):
+    imp = copy_task(generated / "mapping_000_impossible", tmp_path)  # a report-exit bundle...
+    m = load_manifest(imp)
+    m["exit"] = "none"  # ...claiming to have none
+    write_json_atomic(imp / "manifest.json", m)
+    rehash(imp)
+    report = validate_task(imp)
+    assert report["checks"]["exit_not_advertised"] is False and report["valid"] is False
