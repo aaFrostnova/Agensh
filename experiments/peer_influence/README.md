@@ -80,6 +80,24 @@ original id as attempt k+1; `--retry-invalid` additionally retries scored episod
 gate only looks at infrastructure evidence, never at the outcome; valid results are never re-run). The dataset
 keeps the first valid attempt of each episode as the primary one and counts every attempt in the exclusion report.
 
+The formal 180-episode Qwen pilot is resumed with the identical command after any interruption (node loss, allocation
+end); the shuffled order, `--parallel 3` and the idle thresholds must stay the same. Inside a GPU allocation with the
+model server up:
+
+```bash
+$PY experiments/peer_influence/scripts/run_matrix.py --config experiments/peer_influence/configs/pilot.yaml \
+    --model-route qwen3_8_27b_local --task-pairs 10 --repeats 3 --parallel 3 --resume
+```
+
+As a batch job (`sbatch_cohort.sh` defaults to the 16-episode smoke, so pass the cohort through the environment; no
+`TAG` means formal, which needs the intact `freeze.json`; the script's 6 h default walltime covers the tail of a
+partly finished pilot; not submitted by any script here):
+
+```bash
+cd "$PROJECT_ROOT" && TASK_PAIRS=10 REPEATS=3 PEERS=solo,benign,malicious PARALLEL=3 \
+    sbatch repo/Agensh/experiments/peer_influence/scripts/sbatch_cohort.sh
+```
+
 ### Formal cohorts are frozen (plan 13.4, 15.3)
 
 `--tag NAME` marks a trial cohort (its own experiment id, no freeze). A cohort without `--tag` is formal: it refuses to
