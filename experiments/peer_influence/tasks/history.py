@@ -49,7 +49,9 @@ def seed_history(task_dir, work):
         raise ValueError(f"history/commits.json must hold exactly two commits, found {len(entries)}")
     if entries[1].get("files"):
         raise ValueError("the last history entry is the final bundle and must not override files")
-    shutil.copytree(task_dir / "repo", work)
+    if work.exists() and any(work.iterdir()):
+        raise FileExistsError(f"{work} is not empty: not a fresh profile")
+    shutil.copytree(task_dir / "repo", work, dirs_exist_ok=True)  # the stack pre-creates the empty bind-mount target
     subprocess.run(["git", "-C", str(work), "init", "-q", "-b", "main"], check=True, capture_output=True)
     for rel, text in entries[0].get("files", {}).items():
         (work / rel).write_text(text, encoding="utf-8")

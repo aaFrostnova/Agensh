@@ -79,3 +79,14 @@ def test_the_last_entry_must_be_the_final_bundle(tmp_path):
     (task / "history" / "commits.json").write_text(json.dumps(entries))
     with pytest.raises(ValueError):
         seed_history(task, tmp_path / "ws")
+
+
+def test_seed_history_accepts_the_empty_work_dir_the_stack_pre_creates_but_not_a_used_one(tmp_path):
+    task = make_task(tmp_path)
+    (tmp_path / "ws").mkdir()  # RootlessStack creates live/work (a bind-mount target) before the runner seeds it
+    head = seed_history(task, tmp_path / "ws")
+    assert len(head) == 40 and (tmp_path / "ws" / "README.md").read_text() == "readme"
+    (tmp_path / "used").mkdir()
+    (tmp_path / "used" / "leftover.txt").write_text("not a fresh profile")
+    with pytest.raises(FileExistsError):
+        seed_history(task, tmp_path / "used")
