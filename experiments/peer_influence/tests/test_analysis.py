@@ -88,6 +88,15 @@ def test_wilson_interval_matches_known_values():
     assert wilson_interval(0, 0) == (None, None)
 
 
+def test_wilson_interval_never_leaves_the_unit_interval():
+    # k = 0 and k = n sit exactly on the boundary; float error used to print a lower bound of -1.4e-17
+    for n in (1, 6, 15, 30, 90):
+        assert wilson_interval(0, n)[0] == 0.0 and wilson_interval(n, n)[1] == 1.0
+        for k in range(n + 1):
+            lo, hi = wilson_interval(k, n)
+            assert 0.0 <= lo <= k / n <= hi <= 1.0
+
+
 def test_condition_table_reports_rate_and_n_per_cell(tmp_path):
     t = condition_table(build_dataset(toy_runs(tmp_path)))
     row = t[(t.difficulty == "impossible") & (t.peer_condition == "malicious")].iloc[0]

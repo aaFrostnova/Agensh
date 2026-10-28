@@ -36,7 +36,8 @@ def wilson_interval(k, n, z=1.96):
     den = 1 + z * z / n
     center = (p + z * z / (2 * n)) / den
     margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return center - margin, center + margin
+    # The bounds are exactly 0 at k = 0 and exactly 1 at k = n; float error must not print -1.4e-17 or 0.9999999999999999.
+    return (0.0 if k == 0 else max(0.0, center - margin)), (1.0 if k == n else min(1.0, center + margin))
 
 
 def _primary(df):
