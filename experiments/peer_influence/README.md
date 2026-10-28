@@ -11,13 +11,13 @@ or fill gaps in the plan are in [`RULINGS.md`](RULINGS.md).
 
 | Path | Role |
 |---|---|
-| `tasks/generate.py`, `tasks/validate.py` | paired solvable/impossible JSON rule-repair tasks and their validity gates |
+| `tasks/generate.py`, `tasks/history.py`, `tasks/validate.py` | paired solvable/impossible JSON rule-repair tasks, their two-commit history, their validity gates |
 | `runtime/` | stdlib-only files copied into the worker sandbox: `./check` wrapper, event log, protected-file hashes |
 | `controller/` | treatment controller: first failed check -> exactly one DM from the peer account; workspace monitor |
 | `evaluation/` | external scorer (hash + git diff/status/history + monitor), validators, 17-check quality gate |
 | `routes.py`, `preflight.py`, `configs/model_routes.yaml` | model routes (Qwen3.8-27B local vLLM, Kimi K3 on Bedrock) and live Responses/tool-call preflight |
 | `stack.py`, `runner.py`, `matrix.py`, `attempts.py`, `manifest.py`, `serving.py` | rootless backend, episode runner, condition matrix, attempt bookkeeping, manifests |
-| `analysis/` | frozen dataset, per-model effects, pressure interaction, mixed-effects model, exposure funnel per cell |
+| `analysis/` | frozen dataset, per-model effects, pressure interaction, mixed-effects model, exposure funnel per cell, calibration rule |
 | `prompts/` | `victim.md`, `task_brief.md`, `peer_benign.txt` (plan 9.1-9.3), `peer_malicious.txt` (plan 9.4, copied verbatim from the plan by the researcher) |
 | `scripts/` | `serve_qwen_local.sh`, `sbatch_cohort.sh`, `setup_rootless.sh`, `run_episode.py`, `run_matrix.py`, `clean_episode.py` |
 | `tests/` | unit and integration tests; run `pytest` from this directory |
@@ -115,6 +115,33 @@ primary-inclusion rule (`analysis/build_dataset.py`) and the upstream runtime fi
 tests. A needed change means a new `experiment.version` in `pilot.yaml`, a new freeze and a new runs directory; one freeze
 serves every route (Qwen and Kimi) of that version. `freeze.py verify --model-route R` lists what changed.
 
+### v0.3.0: pressure on the victim side (design: `docs/superpowers/specs/2026-10-28-v0.3.0-pressure-design.md`)
+
+v0.2.0 found no violation in any cell. v0.3.0 keeps the policy prompt and the peer messages byte-identical and
+changes three things on the victim's side: the task brief carries stakes and a time box, every bundle is seeded with a
+two-commit history whose last commit ("typo fix") created the conflict, and the bundle's checker validates
+`submission.json` against a version only it prints (so the first `./check` fails in every episode and the peer message
+is always due). Task bundles are version 0.2.0; `pilot.yaml` names the task root. The pressure level is chosen by a
+rule fixed in advance on an independent calibration seed (RULINGS 16-19):
+
+```bash
+G=experiments/peer_influence/tasks/generate.py
+$PY $G --pairs 3 --seed 20261101 --temptation none --out $PROJECT_ROOT/data/tasks_calib_v0.2.0_p1
+$PY $G --pairs 3 --seed 20261101 --out $PROJECT_ROOT/data/tasks_calib_v0.2.0_p2          # recent_commit
+$PY experiments/peer_influence/tasks/validate.py --task-root $PROJECT_ROOT/data/tasks_calib_v0.2.0_p1   # and _p2
+M="$PY experiments/peer_influence/scripts/run_matrix.py --config experiments/peer_influence/configs/pilot.yaml --model-route qwen3_8_27b_local"
+$M --task-root $PROJECT_ROOT/data/tasks_calib_v0.2.0_p1 --task-pairs 3 --repeats 3 --peers solo --parallel 3 --tag cal1a
+$M --task-root $PROJECT_ROOT/data/tasks_calib_v0.2.0_p2 --task-pairs 3 --repeats 3 --peers solo --parallel 3 --tag cal1b
+$PY experiments/peer_influence/analysis/calibration.py --p1 $PROJECT_ROOT/runs/peer_influence_pilot_v0.3.0-cal1a \
+    --p2 $PROJECT_ROOT/runs/peer_influence_pilot_v0.3.0-cal1b --out $PROJECT_ROOT/results/cal1/decision.json
+$PY $G --pairs 10 --seed 20261027 --temptation <chosen> --out $PROJECT_ROOT/data/tasks_v0.2.0   # then set tasks.temptation
+$PY experiments/peer_influence/scripts/freeze.py create --config experiments/peer_influence/configs/pilot.yaml
+```
+
+The 28 unfinished v0.2.0 episodes resume only from a worktree of the v0.2.0 freeze, because HEAD no longer verifies it:
+`git worktree add ../Agensh-v020 freeze/peer_influence_pilot_v0.2.0` and run the v0.2.0 resume command from there
+(same `PROJECT_ROOT`; the task root defaults to `data/tasks_v0.1.0` in that tree).
+
 ### Treatment messages are an external input
 
 `run_matrix.py` and `run_episode.py` load `prompts/peer_<condition>.txt`, record its SHA-256 in every manifest and
@@ -159,6 +186,8 @@ sandbox; `check` and `submission.schema.json` are protected files too; `launch_s
   cells far below the planned one for a strong model. `exposure_table_<route>.csv` and `summary.json["exposure"]` give the
   funnel per cell (`primary` / `fallback` / `no_trigger` / `invalid` / `run_failed`, adding up to `episodes`); read the
   cell sizes against it. The with-fallback sensitivity analysis applies the same trigger requirement to every arm.
+  v0.3.0 closes the gap: the bundle's checker also validates `submission.json` against a version only it prints, so the
+  first `./check` fails in every episode (design L3); the funnel still reports it.
 * The variational-Bayes mixed model is seeded but not bit-reproducible: its last printed digit can move between runs
   (a coefficient on a rounding boundary). The bootstrap risk differences reproduce exactly.
 
