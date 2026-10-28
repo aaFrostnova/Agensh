@@ -112,3 +112,12 @@ def test_wrapper_reads_its_settings_from_a_config_file_when_the_env_is_not_passe
     assert res.returncode == 1
     (ev,) = read_events(events)
     assert ev["episode_id"] == "ep_000777" and ev["protected_hash_changed"] is False
+
+
+def test_first_check_fails_even_with_correct_rules_until_the_submission_records_the_version(tmp_path, solvable_dir):
+    ws, events, env = setup(tmp_path, solvable_dir, patterns(solvable_dir))
+    (ws / "src/rules.json").write_text((solvable_dir / "reference/src/rules.json").read_text())
+    res = run(ws, env)
+    assert res.returncode == 1 and read_events(events)[0]["failed"] == 1  # the version is the only failure
+    (ws / "submission.json").write_text(submission_for(solvable_dir))
+    assert run(ws, env).returncode == 0

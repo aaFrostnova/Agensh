@@ -6,6 +6,7 @@ from pathlib import Path
 
 from peer_influence.common import tree_sha256
 from peer_influence.routes import load_routes, route_hash, validate_profile_env
+from peer_influence.tasks.history import bundle_digest
 
 CHECKS = (
     "fresh_profile", "victim_started", "model_route_resolved", "model_id_matches_manifest",
@@ -85,7 +86,7 @@ def _board_disabled(r):
 
 def _task_hash(r):
     tm = r.json("task_manifest.json")
-    return tree_sha256(r.task_dir / "repo") == tm["bundle_sha256"] == r.manifest["workspace_seed_sha256"]
+    return bundle_digest(r.task_dir) == tm["bundle_sha256"] == r.manifest["workspace_seed_sha256"]
 
 
 def _author_correct(r):

@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import threading
 import time
 import traceback
@@ -27,12 +26,7 @@ from peer_influence.runtime.emit_event import utc_now
 from peer_influence.runtime.protected_hashes import baseline_record, snapshot
 from peer_influence.stack import ProjectPaths, RootlessStack, WorkerSpec, worker_environment
 from peer_influence.tasks.generate import load_manifest
-
-SEED_GIT = {
-    "GIT_AUTHOR_NAME": "seed", "GIT_AUTHOR_EMAIL": "seed@example.invalid", "GIT_COMMITTER_NAME": "seed",
-    "GIT_COMMITTER_EMAIL": "seed@example.invalid", "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
+from peer_influence.tasks.history import bundle_digest, seed_history
 
 
 @dataclass
@@ -78,17 +72,9 @@ def _dir_bytes(root):
     return total
 
 
-def _git(ws, *args, env=None):
-    return subprocess.run(["git", "-C", str(ws), "-c", "commit.gpgsign=false", *args], check=True, capture_output=True,
-                          text=True, env={**os.environ, **(env or {})}).stdout.strip()
-
-
 def seed_workspace(task_dir, work):
-    shutil.copytree(Path(task_dir) / "repo", work, dirs_exist_ok=True)
-    _git(work, "init", "-q", "-b", "main")
-    _git(work, "add", "-A")
-    _git(work, "commit", "-q", "-m", "seed", env=SEED_GIT)
-    return _git(work, "rev-parse", "HEAD")
+    """The agent's /work: the bundle with its two-commit history replayed; HEAD is the scorer's base commit."""
+    return seed_history(task_dir, work)
 
 
 def capture_launch_evidence(work):
@@ -137,7 +123,7 @@ def _run(spec, ctx, run_dir, live, state):
     state["phase"] = "inputs"
     task_dir = ctx.task_root / spec["task_id"]
     task_manifest = load_manifest(task_dir)
-    if tree_sha256(task_dir / "repo") != task_manifest["bundle_sha256"]:
+    if bundle_digest(task_dir) != task_manifest["bundle_sha256"]:
         raise RuntimeError(f"task bundle {spec['task_id']} does not match its manifest hash")
     message, message_sha = load_treatment_message(ctx.prompts_dir, spec["peer_condition"])
     hashes = prompt_hashes(ctx.prompts_dir)
