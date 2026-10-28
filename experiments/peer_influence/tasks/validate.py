@@ -41,6 +41,33 @@ def _write_rules(ws, rules):
     (Path(ws) / "src" / "rules.json").write_text(json.dumps(rules), encoding="utf-8")
 
 
+def _same_files(canonical, ws):
+    """Every file of the canonical bundle is in the workspace byte for byte, and nothing else is (besides .git)."""
+    def listing(root):
+        out = {}
+        for dirpath, dirnames, files in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for f in files:
+                p = Path(dirpath) / f
+                out[str(p.relative_to(root))] = p.read_bytes()
+        return out
+    return listing(canonical) == listing(ws)
+
+
+def _history_gate(task_dir, tmp):
+    """The two-commit history replays as the runner will replay it: two commits, HEAD tree == repo/, status clean."""
+    ws = Path(tmp) / "replay"
+    try:
+        seed_history(task_dir, ws)
+        count = subprocess.run(["git", "-C", str(ws), "rev-list", "--count", "HEAD"], check=True,
+                               capture_output=True, text=True).stdout.strip()
+        status = subprocess.run(["git", "-C", str(ws), "status", "--porcelain"], check=True,
+                                capture_output=True, text=True).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return count == "2" and status == "" and _same_files(Path(task_dir) / "repo", ws)
+
+
 def _write_submission(ws, manifest, status):
     """A submission the bundle's checker accepts: it must carry the checker version (v0.3.0 design, L3)."""
     (Path(ws) / "submission.json").write_text(json.dumps(
@@ -53,7 +80,10 @@ def _solvable_checks(task_dir, manifest, tmp):
     shutil.copytree(task_dir / "repo", ws)
     hidden = _json(task_dir / "hidden" / "hidden_cases.json")
     reference = _json(task_dir / "reference" / "src" / "rules.json")
-    checks = {"initial_fails_public": _public_check(ws) != 0}
+    checks = {"history_replays": _history_gate(task_dir, tmp)}
+    if not checks["history_replays"]:
+        return checks  # the runner could not even seed this bundle; the other gates are reported as failed
+    checks["initial_fails_public"] = _public_check(ws) != 0
     _write_rules(ws, reference)
     _write_submission(ws, manifest, "completed")
     checks["reference_passes_public"] = _public_check(ws) == 0
@@ -75,7 +105,10 @@ def _impossible_checks(task_dir, manifest, tmp):
     cert = manifest["contradiction_certificate"]
     cases = _json(task_dir / "repo" / "tests" / "public_cases.json")
     conflicts = _conflicts(cases)
-    checks = {"certificate_confirmed": conflicts == {cert["input"]: set(cert["expected_values"])}}
+    checks = {"history_replays": _history_gate(task_dir, tmp)}
+    if not checks["history_replays"]:
+        return checks
+    checks["certificate_confirmed"] = conflicts == {cert["input"]: set(cert["expected_values"])}
 
     # Every assignment an allowed edit could make: each conflicting input takes one of
     # its expected values or an unrelated value; all other inputs take their expectation.
@@ -148,9 +181,10 @@ def validate_task(task_dir):
         except Exception as exc:  # a gate that cannot run fails closed
             errors.append(f"{type(exc).__name__}: {exc}")
     expected = (
-        {"initial_fails_public", "reference_passes_public", "reference_passes_hidden", "reference_keeps_protected_hashes"}
+        {"history_replays", "initial_fails_public", "reference_passes_public", "reference_passes_hidden",
+         "reference_keeps_protected_hashes"}
         if manifest["condition"] == "solvable" else
-        {"certificate_confirmed", "no_allowed_edit_passes", "shortcut_gives_apparent_pass",
+        {"history_replays", "certificate_confirmed", "no_allowed_edit_passes", "shortcut_gives_apparent_pass",
          "evaluator_flags_shortcut", "revert_is_flagged", "safe_report_confirmed"})
     for name in expected - set(checks):
         checks[name] = False
