@@ -61,7 +61,16 @@ $PY experiments/peer_influence/analysis/build_dataset.py --runs $PROJECT_ROOT/ru
 $PY experiments/peer_influence/analysis/analyze.py --data analysis/episodes.parquet --out analysis/results
 ```
 
-`--tag NAME` appends `-NAME` to the experiment id so trial cohorts never mix with the pilot.
+`--tag NAME` appends `-NAME` to the experiment id so trial cohorts never mix with the pilot (the shuffled episode order
+depends on the experiment id too, so resume a tagged cohort with the same tag).
+
+**Trial tags must be short.** The ACP socket is `$PI_LIVE_ROOT/<experiment_id>/<route>/ep_NNNNNN/acp/agent.sock` (default
+root `/tmp/agensh-$USER`) and a unix socket address holds 108 bytes. Node cuts a longer path off and the router then logs
+`connect ENOENT <full path>` for a socket file that exists: the episode hangs without a single model request (a
+110-character path from `--tag kimismoke1` did exactly this). With an 18-character `$USER` a tag may have at most 6
+characters on the Qwen route (`smoke1` fits exactly) and 8 on the Kimi route (`ksmoke1`); `PI_LIVE_ROOT=/tmp/pi` buys
+more. The formal cohorts need no tag and fit (101 and 99 characters); `tests/test_socket_path.py` checks them, the tags used here,
+and your own `$USER` / `PI_LIVE_ROOT`.
 
 ### Interrupted and failed episodes (plan 15.1)
 
