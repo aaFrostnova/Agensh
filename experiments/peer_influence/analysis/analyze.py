@@ -25,6 +25,8 @@ from peer_influence.analysis.build_dataset import exclusion_report  # noqa: E402
 DIFFICULTIES = ("solvable", "impossible")
 PEERS = ("solo", "benign", "malicious")
 N_BOOT = 2000
+EXPOSED_TRIGGERS = ("first_failed_check", "fallback_timer")  # the peer message was (or, in solo, would have been) due
+FUNNEL_STAGES = ("primary", "fallback", "no_trigger", "invalid", "run_failed")
 
 
 def wilson_interval(k, n, z=1.96):
@@ -68,6 +70,48 @@ def condition_table(df, primary_only=True):
                 "genuine_success_rate": _rate(cell, "genuine_external_success"),
                 "gaming_gap": _rate(cell, "apparent_local_success") - _rate(cell, "genuine_external_success"),
             })
+    return pd.DataFrame(rows)
+
+
+def _reporting_attempts(df):
+    """One row per episode: its first valid attempt (the one that can be primary), else its last attempt."""
+    if df.empty:
+        return df
+    picked = []
+    for _, group in df.sort_values("attempt").groupby(["model_route", "episode_id"], sort=False):
+        picked.append(group[group["valid"]].iloc[0] if group["valid"].any() else group.iloc[-1])
+    return pd.DataFrame(picked)
+
+
+def _funnel_stage(row):
+    """Where an episode stopped on the way to the peer message; the stages partition the episodes."""
+    if not row["scored"]:
+        return "run_failed"
+    if row["primary"]:
+        return "primary"
+    if pd.isna(row["trigger_source"]):
+        return "no_trigger"  # ended before a failed check or the fallback timer: no message was due
+    if row["trigger_source"] == "fallback_timer" and row["valid"]:
+        return "fallback"
+    return "invalid"  # triggered, but the quality gate (or the operator) rejected the attempt
+
+
+def exposure_table(df):
+    """Per cell, how many episodes got as far as the peer message (plan 10.4, 15.2).
+
+    A fast agent can finish before its first failed check and before the fallback timer: the trigger never fires and
+    no message is due. Those episodes are not primary in any arm alike (a peer arm marks them quality-invalid because
+    the treatment was never delivered, solo marks them valid but without a trigger), so a cell's primary n can be far
+    below the planned one. `no_trigger` is that stage; it is not an infrastructure failure."""
+    episodes = _reporting_attempts(df)
+    episodes = episodes.assign(stage=[_funnel_stage(row) for _, row in episodes.iterrows()])
+    rows = []
+    for difficulty in DIFFICULTIES:
+        for peer in PEERS:
+            cell = _select(episodes, {"difficulty": difficulty, "peer_condition": peer})
+            counts = Counter(cell["stage"])
+            rows.append({"difficulty": difficulty, "peer_condition": peer, "episodes": int(len(cell)),
+                         **{stage: int(counts.get(stage, 0)) for stage in FUNNEL_STAGES}})
     return pd.DataFrame(rows)
 
 
@@ -149,7 +193,9 @@ def mixed_model(df):
         np.random.seed(20261027)  # the variational optimiser starts from random values
         fit = model.fit_vb()
         names = list(model.exog_names)
-        # A variational approximation: report to 4 decimals, not to optimiser noise.
+        # A variational approximation: report to 4 decimals, not to optimiser noise. The optimiser is seeded but not
+        # bit-reproducible (measured: a coefficient on a rounding boundary flips its 4th decimal in ~4% of repeat
+        # calls, single-threaded too), so read the last digit as noise; the bootstrap numbers are exact.
         effects = {n: {"mean": round(float(m), 4), "sd": round(float(s), 4)}
                    for n, m, s in zip(names, fit.fe_mean, fit.fe_sd)}
         return {"status": "ok", "method": "BinomialBayesMixedGLM variational Bayes, task random intercept",
@@ -210,10 +256,16 @@ def analyze(df, out_dir):
     _refuse_mixed_cohorts(df)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    summary = {"models": {}, "exclusions": {}, "sensitivity_with_fallback": {}, "sensitivity_submitted_only": {},
-               "sensitivity_no_runtime_inspection": {}, "replication": {}}
+    summary = {"models": {}, "exclusions": {}, "exposure": {}, "sensitivity_with_fallback": {},
+               "sensitivity_submitted_only": {}, "sensitivity_no_runtime_inspection": {}, "replication": {}}
     for route, sub in df.groupby("model_route"):
         condition_table(sub).to_csv(out / f"condition_table_{route}.csv", index=False)
+        funnel = exposure_table(sub)
+        funnel.to_csv(out / f"exposure_table_{route}.csv", index=False)
+        summary["exposure"][route] = {
+            "cells": funnel.to_dict("records"),
+            "episodes_without_a_cell": int(len(_reporting_attempts(sub)) - funnel["episodes"].sum()),
+        }
         summary["models"][route] = _model_summary(sub)
         summary["models"][route]["end_reasons"] = dict(sorted(Counter(_primary(sub)["end_reason"].fillna("unknown")).items()))
         inspected = _primary(sub)[_primary(sub)["inspected_runtime"].astype(bool)]
@@ -230,7 +282,9 @@ def analyze(df, out_dir):
             "interaction": interaction_contrast(submitted, "benign"),
         }
         summary["exclusions"][route] = exclusion_report(sub)
-        with_fallback = sub.assign(primary=sub["valid"])
+        # Every arm alike: an episode that ended before any trigger is valid in solo (no treatment to check) but
+        # invalid in a peer arm (the message never went out), so `valid` alone would compare unlike episodes.
+        with_fallback = sub.assign(primary=sub["valid"] & sub["trigger_source"].isin(EXPOSED_TRIGGERS))
         summary["sensitivity_with_fallback"][route] = {
             "h2_malicious_minus_solo": risk_difference(with_fallback, {"peer_condition": "malicious"}, {"peer_condition": "solo"}),
             "interaction": interaction_contrast(with_fallback, "benign"),

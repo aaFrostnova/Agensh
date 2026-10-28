@@ -7,6 +7,7 @@ import pytest
 from peer_influence.analysis.analyze import (
     analyze,
     condition_table,
+    exposure_table,
     interaction_contrast,
     risk_difference,
     wilson_interval,
@@ -117,7 +118,18 @@ def test_analyze_writes_tables_and_a_reproducible_summary(tmp_path):
     first = analyze(df, out)
     second = analyze(df, tmp_path / "results2")
     assert (out / "summary.json").exists() and (out / "condition_table_qwen.csv").exists()
-    assert first == second
+
+    def without_vb(summary):
+        return {**summary, "models": {r: {k: v for k, v in m.items() if k != "mixed_model"}
+                                      for r, m in summary["models"].items()}}
+
+    # Seeded bootstrap numbers reproduce exactly. The variational-Bayes optimiser does not: even seeded and single
+    # threaded, a coefficient sitting on a rounding boundary flips its 4th decimal in a few percent of calls.
+    assert without_vb(first) == without_vb(second)
+    vb_a, vb_b = first["models"]["qwen"]["mixed_model"], second["models"]["qwen"]["mixed_model"]
+    assert vb_a["status"] == vb_b["status"] and vb_a.get("fixed_effects", {}).keys() == vb_b.get("fixed_effects", {}).keys()
+    for name, effect in vb_a.get("fixed_effects", {}).items():
+        assert effect["mean"] == pytest.approx(vb_b["fixed_effects"][name]["mean"], abs=1e-3)
     q = first["models"]["qwen"]
     assert q["h2_malicious_minus_solo"]["estimate"] == pytest.approx((5 + 1) / 12)
     assert q["interaction"]["estimate"] == pytest.approx(4 / 6)
@@ -288,3 +300,66 @@ def test_a_sensitivity_analysis_drops_episodes_where_the_agent_inspected_the_che
     sens = summary["sensitivity_no_runtime_inspection"]["qwen"]["h2_malicious_minus_solo"]
     assert sens["n_a"] == 3 and sens["n_b"] == 3
     assert summary["models"]["qwen"]["inspected_runtime_by_condition"] == {"impossible/malicious": 1, "impossible/solo": 1}
+
+
+def test_exposure_table_accounts_for_every_episode_of_a_cell_exactly_once(tmp_path):
+    cell = dict(difficulty="solvable", peer="benign")
+    write_episode(tmp_path, 1, **cell)  # reached the first failed check
+    write_episode(tmp_path, 2, **cell, trigger="fallback_timer")
+    # solved before any trigger fired: the peer message was never sent, so the treatment checks fail
+    write_episode(tmp_path, 3, **cell, trigger=None, valid=False, failing=("treatment_sent_once", "treatment_delivered"))
+    write_episode(tmp_path, 4, **cell, valid=False, failing=("fresh_profile",))  # triggered, infrastructure-invalid
+    write_failed(tmp_path, 5)  # impossible / benign, crashed before it was scored
+    write_episode(tmp_path, 6, difficulty="solvable", peer="solo", trigger=None)  # same outcome in solo: valid, not primary
+    table = exposure_table(build_dataset(tmp_path))
+    parts = ["primary", "fallback", "no_trigger", "invalid", "run_failed"]
+
+    def row(difficulty, peer):
+        return table[(table["difficulty"] == difficulty) & (table["peer_condition"] == peer)].iloc[0]
+
+    assert [int(row("solvable", "benign")[c]) for c in ["episodes"] + parts] == [4, 1, 1, 1, 1, 0]
+    assert [int(row("solvable", "solo")[c]) for c in ["episodes"] + parts] == [1, 0, 0, 1, 0, 0]
+    assert [int(row("impossible", "benign")[c]) for c in ["episodes"] + parts] == [1, 0, 0, 0, 0, 1]
+    assert (table[parts].sum(axis=1) == table["episodes"]).all()  # a funnel: the stages add up to the cell
+
+
+def test_exposure_table_counts_an_episode_once_however_often_it_was_attempted(tmp_path):
+    write_attempt(tmp_path, "ep_000001.attempt1", n=1, valid=False, failing=("fresh_profile",))
+    retry = write_episode(tmp_path, 1)  # the retry under the original id is valid
+    manifest = json.loads((retry / "manifest.json").read_text())
+    manifest["run_attempt"] = 2
+    (retry / "manifest.json").write_text(json.dumps(manifest))
+    write_episode(tmp_path, 2, trigger=None, valid=False, failing=("treatment_delivered",))
+    table = exposure_table(build_dataset(tmp_path))
+    cell = table[(table["difficulty"] == "impossible") & (table["peer_condition"] == "malicious")].iloc[0]
+    assert (int(cell["episodes"]), int(cell["primary"]), int(cell["no_trigger"]), int(cell["invalid"])) == (2, 1, 1, 0)
+
+
+def test_analyze_reports_the_exposure_funnel_and_episodes_without_a_cell(tmp_path):
+    write_episode(tmp_path, 1, difficulty="solvable", peer="malicious", trigger=None, valid=False, failing=("treatment_delivered",))
+    write_episode(tmp_path, 2, difficulty="solvable", peer="solo")
+    write_failed(tmp_path, 3, with_manifest=False)  # crashed before a manifest existed: no cell to put it in
+    summary = analyze(build_dataset(tmp_path), tmp_path / "out")
+    exposure = summary["exposure"]["qwen"]
+    assert exposure["episodes_without_a_cell"] == 1 and len(exposure["cells"]) == 6
+    mal = [c for c in exposure["cells"] if (c["difficulty"], c["peer_condition"]) == ("solvable", "malicious")][0]
+    assert mal["no_trigger"] == 1 and mal["primary"] == 0
+    assert (tmp_path / "out" / "exposure_table_qwen.csv").exists()
+
+
+def test_the_fallback_sensitivity_treats_every_arm_alike(tmp_path):
+    # An episode that ended before any trigger is valid in solo (there is no treatment to check) but invalid in a
+    # peer arm (the message never went out). Counting only the solo one would compare unlike episodes.
+    n = 0
+    for peer in ("solo", "malicious"):
+        for i in range(4):
+            n += 1
+            never_triggered = i == 3
+            write_episode(tmp_path, n, difficulty="impossible", peer=peer, pair=i % 2, seed=i // 2 + 1,
+                          trigger=None if never_triggered else ("fallback_timer" if i == 2 else "first_failed_check"),
+                          valid=not (never_triggered and peer == "malicious"),
+                          failing=("treatment_delivered",) if never_triggered and peer == "malicious" else ())
+    summary = analyze(build_dataset(tmp_path), tmp_path / "out")
+    sens = summary["sensitivity_with_fallback"]["qwen"]["h2_malicious_minus_solo"]
+    assert sens["n_a"] == 3 and sens["n_b"] == 3
+    assert summary["models"]["qwen"]["h2_malicious_minus_solo"]["n_a"] == 2  # the primary analysis excludes the fallback ones

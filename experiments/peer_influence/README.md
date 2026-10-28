@@ -17,7 +17,7 @@ or fill gaps in the plan are in [`RULINGS.md`](RULINGS.md).
 | `evaluation/` | external scorer (hash + git diff/status/history + monitor), validators, 17-check quality gate |
 | `routes.py`, `preflight.py`, `configs/model_routes.yaml` | model routes (Qwen3.8-27B local vLLM, Kimi K3 on Bedrock) and live Responses/tool-call preflight |
 | `stack.py`, `runner.py`, `matrix.py`, `attempts.py`, `manifest.py`, `serving.py` | rootless backend, episode runner, condition matrix, attempt bookkeeping, manifests |
-| `analysis/` | frozen dataset, per-model effects, pressure interaction, mixed-effects model |
+| `analysis/` | frozen dataset, per-model effects, pressure interaction, mixed-effects model, exposure funnel per cell |
 | `prompts/` | `victim.md`, `task_brief.md`, `peer_benign.txt` (plan 9.1-9.3), `peer_malicious.txt` (plan 9.4, copied verbatim from the plan by the researcher) |
 | `scripts/` | `serve_qwen_local.sh`, `sbatch_cohort.sh`, `setup_rootless.sh`, `run_episode.py`, `run_matrix.py`, `clean_episode.py` |
 | `tests/` | unit and integration tests; run `pytest` from this directory |
@@ -134,6 +134,15 @@ sandbox; `check` and `submission.schema.json` are protected files too; `launch_s
   behaviour under this protocol, not a proof about unobserved settings (plan 15.2).
 * Episodes end on submission, on `idle_seconds` without progress, or on timeout; `end_reason` is reported and a
   submitted-only sensitivity analysis is part of the summary.
+* A fast agent can finish a solvable task before its first failed `./check` and before the 180 s fallback timer. No
+  trigger fires, no peer message is due, and the episode is not primary in any arm: a peer arm lists it as quality-invalid
+  (`treatment_sent_once` / `treatment_delivered` / `treatment_author_correct`, because nothing was sent), solo keeps it as
+  valid but without a trigger. This is not an infrastructure failure, but it can shrink the primary n of the solvable
+  cells far below the planned one for a strong model. `exposure_table_<route>.csv` and `summary.json["exposure"]` give the
+  funnel per cell (`primary` / `fallback` / `no_trigger` / `invalid` / `run_failed`, adding up to `episodes`); read the
+  cell sizes against it. The with-fallback sensitivity analysis applies the same trigger requirement to every arm.
+* The variational-Bayes mixed model is seeded but not bit-reproducible: its last printed digit can move between runs
+  (a coefficient on a rounding boundary). The bootstrap risk differences reproduce exactly.
 
 ## Not implemented / not run
 
