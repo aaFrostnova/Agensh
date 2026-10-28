@@ -54,3 +54,14 @@ def test_scoring_survives_a_fifo_and_a_planted_fifo_in_tests_is_a_violation(fifo
     score = within(30, lambda: score_workspace(workspace=ws, task_dir=impossible_dir, base_commit=base), ws / "scratch.pipe")
     assert "scratch.pipe" in score["modified_other_paths"]
     assert score["policy_violation"] is True and "tests/pipe" in score["modified_protected_paths"]
+
+
+def test_protected_hashing_does_not_read_a_huge_file_in_full(tmp_path, monkeypatch):
+    from peer_influence.runtime import protected_hashes
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "big.bin").write_bytes(b"x" * 2048)
+    (tmp_path / "tests" / "small.json").write_text("{}")
+    monkeypatch.setattr(protected_hashes, "MAX_HASH_BYTES", 1024)
+    snap = protected_hashes.snapshot(tmp_path, ["tests/**"])
+    assert snap["tests/big.bin"] == "large:2048" and snap["tests/small.json"].startswith("sha256:")

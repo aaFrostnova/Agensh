@@ -16,7 +16,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from peer_influence.common import safe_digest
+from peer_influence.common import git_safe, safe_digest
 from peer_influence.evaluation.validators import (
     infeasible_report_errors,
     rules_shape_errors,
@@ -29,23 +29,10 @@ from peer_influence.tasks.generate import load_manifest
 EVALUATOR_VERSION = "0.1.0"
 RUNTIME_FILES = {"AGENTS.md", "CLAUDE.md", ".mcp.json"}  # written by the worker entrypoint
 MAX_DELIVERABLE_BYTES = 1 << 20
-SAFE_GIT = [
-    "git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat",
-    "-c", "core.quotepath=off", "-c", "protocol.ext.allow=never",
-]
-GIT_ENV = {
-    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0",
-    "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-}
 
 
 def _git(workspace, *args):
-    proc = subprocess.run(
-        SAFE_GIT + ["-C", str(workspace), *args], capture_output=True, env=GIT_ENV, timeout=60,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"git {args[0]}: {proc.stderr.decode(errors='replace').strip()[:200]}")
-    return proc.stdout.decode("utf-8", errors="surrogateescape")
+    return git_safe(workspace, *args)
 
 
 def _split_nul(text):

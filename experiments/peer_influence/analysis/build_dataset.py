@@ -19,23 +19,52 @@ def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def build_dataset(runs_dir):
+def _episode_dirs(runs_dir):
     runs_dir = Path(runs_dir)
-    score_paths = sorted(runs_dir.glob("*/*/score.json")) + sorted(runs_dir.glob("*/score.json"))
+    found = {}
+    for pattern in ("*/*", "*"):
+        for ep in runs_dir.glob(pattern):
+            if ep.is_dir() and ((ep / "score.json").exists() or (ep / "run_failed.json").exists()):
+                found[ep] = None
+    return sorted(found)
+
+
+def _failed_row(ep):
+    """An episode that crashed before it was scored still counts: as invalid, never primary."""
+    failure = _read(ep / "run_failed.json")
+    manifest = _read(ep / "manifest.json") if (ep / "manifest.json").exists() else {}
+    return {
+        "model_route": manifest.get("model_route", ep.parent.name), "episode_id": manifest.get("episode_id", ep.name),
+        "experiment_id": manifest.get("experiment_id"), "route_hash": manifest.get("route_hash"),
+        "task_id": manifest.get("task_id"), "pair_id": manifest.get("task_pair_id"),
+        "difficulty": manifest.get("difficulty"), "peer_condition": manifest.get("peer_condition"),
+        "seed": manifest.get("seed"), "run_attempt": manifest.get("run_attempt"), "trigger_source": None,
+        "end_reason": None, "valid": False, "failed_checks": "run_failed", "scored": False,
+        "run_failed_phase": failure.get("phase"), "policy_violation": 0, "violation_types": "",
+        "safe_abstention": 0, "false_abstention": 0, "genuine_external_success": 0, "apparent_local_success": 0,
+        "submission_status": None, "treatment_to_first_violation_seconds": None, "violation_before_treatment": 0,
+        "primary": False,
+    }
+
+
+def build_dataset(runs_dir):
     rows = []
-    for sp in score_paths:
-        ep = sp.parent
-        score, manifest = _read(sp), _read(ep / "manifest.json")
+    for ep in _episode_dirs(runs_dir):
+        if not (ep / "score.json").exists():
+            rows.append(_failed_row(ep))
+            continue
+        score, manifest = _read(ep / "score.json"), _read(ep / "manifest.json")
         quality = _read(ep / "quality_report.json")
         trigger = _read(ep / "controller_state.json").get("trigger_source")
         failed = sorted(k for k, v in quality["checks"].items() if not v)
         rows.append({
             "model_route": manifest["model_route"], "episode_id": manifest["episode_id"],
+            "experiment_id": manifest.get("experiment_id"), "route_hash": manifest.get("route_hash"),
             "task_id": manifest["task_id"], "pair_id": manifest["task_pair_id"],
             "difficulty": manifest["difficulty"], "peer_condition": manifest["peer_condition"],
             "seed": manifest["seed"], "run_attempt": manifest["run_attempt"], "trigger_source": trigger,
             "end_reason": manifest.get("end_reason"), "valid": bool(quality["valid"]),
-            "failed_checks": ",".join(failed),
+            "failed_checks": ",".join(failed), "scored": True, "run_failed_phase": None,
             "policy_violation": int(score["policy_violation"]),
             "violation_types": ",".join(score["violation_types"]),
             "safe_abstention": int(score["safe_abstention"]), "false_abstention": int(score["false_abstention"]),
@@ -55,6 +84,8 @@ def exclusion_report(df):
     return {
         "n_episodes": int(len(df)), "n_primary": int(df["primary"].sum()), "n_invalid": int(len(invalid)),
         "invalid_by_check": dict(sorted(counts.items())),
+        "n_run_failed": int((~df["scored"]).sum()),
+        "run_failed_by_phase": dict(sorted(Counter(df.loc[~df["scored"], "run_failed_phase"].fillna("unknown")).items())),
         "fallback_trigger": int((df["trigger_source"] == "fallback_timer").sum()),
         "fallback_share": float((df["trigger_source"] == "fallback_timer").mean()) if len(df) else 0.0,
     }

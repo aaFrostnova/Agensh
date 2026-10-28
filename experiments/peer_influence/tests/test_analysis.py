@@ -15,14 +15,15 @@ from peer_influence.analysis.build_dataset import build_dataset, exclusion_repor
 
 
 def write_episode(root, n, *, route="qwen", difficulty="impossible", peer="malicious", pair=0, seed=1,
-                  violation=False, valid=True, trigger="first_failed_check", failing=()):
+                  violation=False, valid=True, trigger="first_failed_check", failing=(), end_reason="submitted",
+                  experiment_id="x", route_hash="h1"):
     d = root / route / f"ep_{n:06d}"
     d.mkdir(parents=True)
     task = f"mapping_{pair:03d}_{difficulty}"
     (d / "manifest.json").write_text(json.dumps({
-        "experiment_id": "x", "episode_id": f"ep_{n:06d}", "model_route": route, "task_id": task,
+        "experiment_id": experiment_id, "route_hash": route_hash, "episode_id": f"ep_{n:06d}", "model_route": route, "task_id": task,
         "task_pair_id": f"mapping_{pair:03d}", "difficulty": difficulty, "peer_condition": peer, "seed": seed,
-        "run_attempt": 1, "trigger_source": trigger, "end_reason": "submitted"}))
+        "run_attempt": 1, "trigger_source": trigger, "end_reason": end_reason}))
     (d / "score.json").write_text(json.dumps({
         "episode_id": f"ep_{n:06d}", "policy_violation": violation, "violation_types": ["protected_file_write"] if violation else [],
         "safe_abstention": (not violation and difficulty == "impossible"), "false_abstention": False,
@@ -123,3 +124,60 @@ def test_analyze_writes_tables_and_a_reproducible_summary(tmp_path):
     assert q["mixed_model"]["status"] in ("ok", "failed")
     assert np.isfinite(q["mixed_model"].get("interaction_log_odds", 0.0))
     assert first["exclusions"]["qwen"]["n_primary"] == 36
+
+
+def write_failed(root, n, route="qwen", phase="stack", with_manifest=True):
+    d = root / route / f"ep_{n:06d}"
+    d.mkdir(parents=True)
+    (d / "run_failed.json").write_text(json.dumps({"phase": phase, "error": "RuntimeError: boom"}))
+    if with_manifest:
+        (d / "manifest.json").write_text(json.dumps({
+            "experiment_id": "x", "route_hash": "h1", "episode_id": f"ep_{n:06d}", "model_route": route,
+            "task_id": "mapping_000_impossible", "task_pair_id": "mapping_000", "difficulty": "impossible",
+            "peer_condition": "benign", "seed": 1, "run_attempt": 1}))
+
+
+def test_episodes_that_crashed_before_scoring_are_counted_not_dropped(tmp_path):
+    write_episode(tmp_path, 1, violation=True)
+    write_failed(tmp_path, 2)
+    write_failed(tmp_path, 3, phase="inputs", with_manifest=False)  # failed before a manifest existed
+    df = build_dataset(tmp_path)
+    assert len(df) == 3
+    failed = df[df["episode_id"].isin(["ep_000002", "ep_000003"])]
+    assert not failed["valid"].any() and not failed["primary"].any() and (failed["failed_checks"] == "run_failed").all()
+    assert set(failed["model_route"]) == {"qwen"}
+    rep = exclusion_report(df)
+    assert rep["n_episodes"] == 3 and rep["n_run_failed"] == 2 and rep["n_primary"] == 1
+    assert rep["run_failed_by_phase"] == {"inputs": 1, "stack": 1}
+
+
+def test_dataset_carries_experiment_and_route_identity_and_analysis_refuses_to_mix_cohorts(tmp_path):
+    write_episode(tmp_path, 1, experiment_id="exp_v1")
+    write_episode(tmp_path, 2, experiment_id="exp_v2")
+    df = build_dataset(tmp_path)
+    assert {"experiment_id", "route_hash"} <= set(df.columns)
+    with pytest.raises(ValueError, match="mixed"):
+        analyze(df, tmp_path / "out")
+    other_hash = build_dataset(_runs_with_two_route_hashes(tmp_path / "second"))
+    with pytest.raises(ValueError, match="mixed"):
+        analyze(other_hash, tmp_path / "out2")
+
+
+def _runs_with_two_route_hashes(root):
+    write_episode(root, 1, route_hash="h1")
+    write_episode(root, 2, route_hash="h2")
+    return root
+
+
+def test_end_reasons_are_reported_and_a_submitted_only_sensitivity_is_given(tmp_path):
+    n = 0
+    for peer, k in (("solo", 0), ("malicious", 3)):
+        for i in range(4):
+            n += 1
+            write_episode(tmp_path, n, difficulty="impossible", peer=peer, pair=i % 2, seed=i // 2 + 1,
+                          violation=i < k, end_reason="submitted" if i < 3 else "idle")
+    summary = analyze(build_dataset(tmp_path), tmp_path / "out")
+    model = summary["models"]["qwen"]
+    assert model["end_reasons"] == {"idle": 2, "submitted": 6}
+    sens = summary["sensitivity_submitted_only"]["qwen"]
+    assert sens["h2_malicious_minus_solo"]["n_a"] == 3 and sens["h2_malicious_minus_solo"]["n_b"] == 3

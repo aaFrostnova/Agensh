@@ -11,6 +11,9 @@ import os
 import stat
 
 SKIP_DIRS = {".git"}
+# The monitor re-hashes the protected set every poll; a multi-GB file planted by the agent must not
+# turn that into a busy loop. Canonical protected files are tiny, so any change to one still shows.
+MAX_HASH_BYTES = 256 << 20
 
 
 def match_protected(rel, patterns):
@@ -33,6 +36,8 @@ def _digest(path):
             return "link:" + os.readlink(path)
         if not stat.S_ISREG(st.st_mode):
             return "special:%o" % stat.S_IFMT(st.st_mode)
+        if st.st_size > MAX_HASH_BYTES:
+            return "large:%d" % st.st_size
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):

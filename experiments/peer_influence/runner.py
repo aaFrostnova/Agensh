@@ -17,7 +17,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from peer_influence.common import sha256_bytes, tree_sha256, write_json_atomic
+from peer_influence.common import git_safe, safe_copyfile, safe_copytree, sha256_bytes, tree_sha256, write_json_atomic
 from peer_influence.controller.app import ControllerConfig, TreatmentController
 from peer_influence.evaluation.quality import quality_report
 from peer_influence.evaluation.score_episode import score_workspace
@@ -33,7 +33,6 @@ SEED_GIT = {
     "GIT_COMMITTER_EMAIL": "seed@example.invalid", "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
 }
-MAX_SNAPSHOT_BYTES = 200 << 20
 
 
 @dataclass
@@ -89,6 +88,15 @@ def seed_workspace(task_dir, work):
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "seed", env=SEED_GIT)
     return _git(work, "rev-parse", "HEAD")
+
+
+def capture_launch_evidence(work):
+    """What the agent was given: the rendered prompt and the MCP servers it can reach. Read before
+    the first turn; raises (the episode fails) rather than inventing evidence."""
+    work = Path(work)
+    agents = (work / "AGENTS.md").read_bytes()
+    servers = sorted(json.loads((work / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"])
+    return {"agents_md_sha256": sha256_bytes(agents), "mcp_servers": servers}
 
 
 def render_brief(prompts_dir, public_task_id):
@@ -178,6 +186,7 @@ def _run(spec, ctx, run_dir, live, state):
             board_url=stack.url("board"), relay_url=stack.url("relay"), route=route, episode_id=spec["episode_id"])
         write_json_atomic(run_dir / "worker_env.json", worker_environment(wspec))
         stack.start_worker(wspec)
+        write_json_atomic(run_dir / "launch_evidence.json", capture_launch_evidence(work))
         stack.start_router(victim)
         time.sleep(3)  # let the router's websocket attach before the kickoff arrives
 
@@ -280,10 +289,9 @@ def _wait(stack, ctx, work, manifest, log):
 
 
 def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
-    for src, dest in (("events/events.jsonl", "events.jsonl"),):
-        if (live / src).exists():
-            shutil.copy2(live / src, run_dir / dest)
-            shutil.copy2(live / src, run_dir / "public_check_history.jsonl")
+    # events.jsonl lives in a directory the agent controls: copy it only if it is a plain file.
+    if safe_copyfile(live / "events" / "events.jsonl", run_dir / "events.jsonl", 16 << 20):
+        shutil.copy2(run_dir / "events.jsonl", run_dir / "public_check_history.jsonl")
     for name in ("events.jsonl", "messages.jsonl", "workspace_events.jsonl"):
         (run_dir / name).touch(exist_ok=True)
     for log in (live / "logs").glob("*.log"):
@@ -291,30 +299,30 @@ def _collect(stack, live, run_dir, dm_channel, worker_rc, base_commit):
 
     work = live / "work"
     final = run_dir / "workspace_snapshots" / "final"
-    truncated = _dir_bytes(work) > MAX_SNAPSHOT_BYTES
-    if not truncated:
-        shutil.copytree(work, final, symlinks=True)
+    copy_report = safe_copytree(work, final)
     after = baseline_record(final if final.exists() else work, json.loads(
         (run_dir / "task_manifest.json").read_text())["protected_paths"])
     write_json_atomic(run_dir / "protected_hashes_after.json", after)
     write_json_atomic(run_dir / "snapshot_summary.json", {
-        "truncated": truncated, "live_tree_sha256": tree_sha256(work),
-        "copy_tree_sha256": tree_sha256(final) if final.exists() else None})
+        "copy_report": copy_report, "live_tree_sha256": tree_sha256(work, skip_unreadable=True),
+        "copy_tree_sha256": tree_sha256(final, skip_unreadable=True)})
     (run_dir / "gitea_bundle").mkdir(exist_ok=True)
-    subprocess.run(["git", "-C", str(work), "bundle", "create", str(run_dir / "gitea_bundle" / "workspace.bundle"), "--all"],
-                   capture_output=True)
+    try:
+        git_safe(work, "bundle", "create", str(run_dir / "gitea_bundle" / "workspace.bundle"), "--all")
+    except Exception as exc:  # the bundle is a convenience copy; the snapshot is the evidence
+        (run_dir / "gitea_bundle" / "BUNDLE_FAILED.txt").write_text(str(exc))
 
     traj = run_dir / "agensh_trajectory"
     traj.mkdir(exist_ok=True)
     data = live / "agent_data"
     complete = False
     if (data / "shutdown").exists():
-        shutil.copytree(data / "shutdown", traj / "shutdown", dirs_exist_ok=True)
+        safe_copytree(data / "shutdown", traj / "shutdown")
         manifests = list((traj / "shutdown").glob("*/manifest.json"))
         complete = bool(manifests) and all(json.loads(m.read_text()).get("status") == "complete" for m in manifests)
     copilot = data / "home" / ".copilot"
     if copilot.exists() and _dir_bytes(copilot) < (100 << 20):
-        shutil.copytree(copilot, traj / "copilot_home", symlinks=True, dirs_exist_ok=True)
+        safe_copytree(copilot, traj / "copilot_home")
     write_json_atomic(run_dir / "trajectory_summary.json", {"archive_manifest_complete": complete, "worker_exit_code": worker_rc})
 
     sent = json.loads((run_dir / "controller_state.json").read_text()).get("sent")

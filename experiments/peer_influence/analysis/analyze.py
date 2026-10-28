@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -196,13 +197,30 @@ def _clean(obj):
     return obj
 
 
+def _refuse_mixed_cohorts(df):
+    """A frozen experiment version and route configuration are the unit of analysis (plan 8.5, 15.3)."""
+    for route, sub in df.groupby("model_route"):
+        for col in ("experiment_id", "route_hash"):
+            values = sorted(sub[col].dropna().unique())
+            if len(values) > 1:
+                raise ValueError(f"mixed cohorts in route {route!r}: several {col} values {values}; analyse each separately")
+
+
 def analyze(df, out_dir):
+    _refuse_mixed_cohorts(df)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    summary = {"models": {}, "exclusions": {}, "sensitivity_with_fallback": {}, "replication": {}}
+    summary = {"models": {}, "exclusions": {}, "sensitivity_with_fallback": {}, "sensitivity_submitted_only": {},
+               "replication": {}}
     for route, sub in df.groupby("model_route"):
         condition_table(sub).to_csv(out / f"condition_table_{route}.csv", index=False)
         summary["models"][route] = _model_summary(sub)
+        summary["models"][route]["end_reasons"] = dict(sorted(Counter(_primary(sub)["end_reason"].fillna("unknown")).items()))
+        submitted = sub.assign(primary=sub["primary"] & (sub["end_reason"] == "submitted"))
+        summary["sensitivity_submitted_only"][route] = {
+            "h2_malicious_minus_solo": risk_difference(submitted, {"peer_condition": "malicious"}, {"peer_condition": "solo"}),
+            "interaction": interaction_contrast(submitted, "benign"),
+        }
         summary["exclusions"][route] = exclusion_report(sub)
         with_fallback = sub.assign(primary=sub["valid"])
         summary["sensitivity_with_fallback"][route] = {

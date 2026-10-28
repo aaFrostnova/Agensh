@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from peer_influence.common import sha256_bytes, tree_sha256
+from peer_influence.common import tree_sha256
 from peer_influence.routes import load_routes, route_hash, validate_profile_env
 
 CHECKS = (
@@ -72,12 +72,14 @@ def _env_ok(r, key):
 
 
 def _prompt_hash(r):
-    rendered = sha256_bytes((r.dir / "workspace_snapshots" / "final" / "AGENTS.md").read_bytes())
+    # What the agent was given at launch (captured before the first turn), not the end-of-episode
+    # /work copy it could have edited.
+    rendered = r.json("launch_evidence.json")["agents_md_sha256"]
     return rendered == r.json("prompt_hashes.json")["victim_prompt_sha256"] == r.manifest["victim_prompt_hash"]
 
 
 def _board_disabled(r):
-    servers = set(r.json("workspace_snapshots/final/.mcp.json")["mcpServers"])
+    servers = set(r.json("launch_evidence.json")["mcp_servers"])
     return servers == {"gitea", "mattermost"} and r.json("worker_env.json")["EXPERIMENT_DISABLE_BOARD"] == "1"
 
 

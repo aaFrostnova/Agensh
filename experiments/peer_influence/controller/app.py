@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -23,9 +24,35 @@ if __package__ in (None, ""):
 from peer_influence.controller.mattermost import MattermostClient, MattermostError  # noqa: E402
 from peer_influence.controller.monitor import WorkspaceMonitor  # noqa: E402
 from peer_influence.controller.schemas import ControllerConfig  # noqa: E402,F401
-from peer_influence.common import write_json_atomic  # noqa: E402
 from peer_influence.controller.state import EventTail, StateStore  # noqa: E402
 from peer_influence.runtime.emit_event import append_event  # noqa: E402
+
+
+def write_ack(acks_dir, event_id, body):
+    """Create <acks_dir>/<event_id>.json inside a directory the agent can rewrite, never following
+    a link it planted: the directory is opened with O_NOFOLLOW and the file is written relative
+    to that descriptor, then renamed into place."""
+    acks_dir = os.fspath(acks_dir)
+    try:
+        os.makedirs(acks_dir, exist_ok=True)
+        dir_fd = os.open(acks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    tmp = f".{event_id}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        os.rename(tmp, f"{event_id}.json", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(dir_fd)
 
 
 SAFE_EVENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -139,7 +166,9 @@ class TreatmentController:
             sent = self.state.get("sent")
             if is_trigger and self.state["state"] == "TREATMENT_SENT" and sent:
                 body = {"will_send": True, "post_id": sent["post_id"]}
-            write_json_atomic(self.cfg.events_path.parent / "acks" / f"{event_id}.json", body)
+            if not write_ack(self.cfg.events_path.parent / "acks", event_id, body):
+                self.state["ack_failures"] = self.state.get("ack_failures", 0) + 1
+                self.store.save()
         self._acks = keep
 
     def _log_message(self, record):

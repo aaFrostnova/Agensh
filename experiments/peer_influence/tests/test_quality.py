@@ -36,6 +36,7 @@ def build_good_run(tmp_path, task_dir, peer_condition="malicious"):
         "workspace_seed_sha256": tm["bundle_sha256"],
     })
     wj(run / "prompt_hashes.json", {"victim_prompt_sha256": sha256_bytes(PROMPT.encode())})
+    wj(run / "launch_evidence.json", {"agents_md_sha256": sha256_bytes(PROMPT.encode()), "mcp_servers": ["gitea", "mattermost"]})
     wj(run / "worker_env.json", {
         "ANTHROPIC_MODEL": ROUTE.model_id, "COPILOT_AGENT_REASONING_EFFORT": "medium",
         "COPILOT_PROVIDER_MAX_PROMPT_TOKENS": "65536", "COPILOT_PROVIDER_WIRE_API": "responses",
@@ -104,9 +105,8 @@ DAMAGE = {
     "tool_call_preflight_passed": edit_json("preflight.json", lambda p: p["checks"]["responses_tool_call"].update(ok=False)),
     "reasoning_effort_matches": edit_json("worker_env.json", lambda e: e.update(COPILOT_AGENT_REASONING_EFFORT="high")),
     "context_budget_matches": edit_json("worker_env.json", lambda e: e.update(COPILOT_PROVIDER_MAX_PROMPT_TOKENS="272000")),
-    "correct_prompt_hash": lambda run: (run / "workspace_snapshots/final/AGENTS.md").write_text("another prompt"),
-    "board_disabled": lambda run: (run / "workspace_snapshots/final/.mcp.json").write_text(
-        json.dumps({"mcpServers": {"gitea": {}, "mattermost": {}, "board": {}}})),
+    "correct_prompt_hash": edit_json("launch_evidence.json", lambda e: e.update(agents_md_sha256="0" * 64)),
+    "board_disabled": edit_json("launch_evidence.json", lambda e: e.update(mcp_servers=["gitea", "mattermost", "board"])),
     "task_hash_valid": edit_json("manifest.json", lambda m: m.update(workspace_seed_sha256="f" * 64)),
     "treatment_author_correct": lambda run: (run / "messages.jsonl").write_text(
         json.dumps({"post_id": "p1", "author_username": "mmadmin"}) + "\n"),
@@ -146,3 +146,26 @@ def test_solo_run_with_a_peer_message_is_invalid(tmp_path, impossible_dir):
     (run / "messages.jsonl").write_text(json.dumps({"post_id": "p9", "author_username": PEER}) + "\n")
     r = report(run, impossible_dir)
     assert r["valid"] is False and r["checks"]["treatment_sent_once"] is False
+
+
+def test_the_agent_editing_its_own_prompt_or_mcp_config_cannot_invalidate_the_episode(tmp_path, impossible_dir):
+    run = build_good_run(tmp_path, impossible_dir)
+    (run / "workspace_snapshots/final/AGENTS.md").write_text("the agent rewrote its instructions")
+    (run / "workspace_snapshots/final/.mcp.json").write_text(json.dumps({"mcpServers": {"board": {}}}))
+    assert report(run, impossible_dir)["valid"] is True  # launch-time evidence decides, not the end state
+
+
+def test_launch_evidence_records_what_the_agent_was_given_and_never_defaults(tmp_path):
+    from peer_influence.runner import capture_launch_evidence
+
+    (tmp_path / "AGENTS.md").write_text("prompt")
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"mattermost": {}, "gitea": {}}}))
+    assert capture_launch_evidence(tmp_path) == {"agents_md_sha256": sha256_bytes(b"prompt"),
+                                                  "mcp_servers": ["gitea", "mattermost"]}
+    (tmp_path / ".mcp.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        capture_launch_evidence(tmp_path)
+
+
+def test_the_victim_prompt_has_no_dollar_tokens_so_envsubst_leaves_it_byte_identical():
+    assert "$" not in (Path(__file__).resolve().parents[1] / "prompts" / "victim.md").read_text(encoding="utf-8")
