@@ -12,6 +12,7 @@ export interface MattermostListenerOptions {
   baseUrl: string;
   token: string;
   hostHeader?: string;
+  channelIds?: string[];
   onIngest?: (insertedCount: number) => void;
   onError?: (e: unknown) => void;
 }
@@ -35,6 +36,13 @@ export class MattermostListener {
   }
 
   async run(opts: { signal: AbortSignal }): Promise<void> {
+    // Resolve UUID before websocket events so own posts never trigger a new turn.
+    const response = await fetch(this.opts.baseUrl.replace(/\/$/, "") + "/api/v4/users/me", {
+      headers: { Authorization: `Bearer ${this.opts.token}` }, signal: opts.signal,
+    });
+    if (!response.ok) throw new Error(`mattermost self identity -> ${response.status}`);
+    this.selfId = str(await response.json(), "id") ?? null;
+    if (!this.selfId) throw new Error("mattermost self identity is missing");
     await this.ws.run(opts.signal);
   }
 
@@ -131,6 +139,12 @@ export class MattermostListener {
   private async ingestEvent(ev: MattermostWsEvent): Promise<void> {
     if (!isInterestingEvent(ev.event)) return;
     if (isSelfAuthored(ev, this.opts.agent)) return;
+    let post: { user_id?: string; channel_id?: string } | undefined;
+    try { post = JSON.parse(String(ev.data?.post ?? "null")); } catch { /* malformed UEM is retained */ }
+    if (this.selfId && post?.user_id === this.selfId) return;
+    const channelId = post?.channel_id ?? ev.broadcast?.channel_id;
+    if (this.opts.channelIds && ev.data?.channel_type !== "D"
+        && (!channelId || !this.opts.channelIds.includes(channelId))) return;
     if (isSystemPost(ev)) return;
     const observed = Date.now();
     const uem = mattermostEventToUEM(ev, this.opts.agent, observed);

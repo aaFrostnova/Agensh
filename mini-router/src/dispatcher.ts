@@ -24,6 +24,7 @@ export interface DispatcherLogEntry {
 export interface DispatcherOptions {
   agent: string;
   groupMessageDirectory: string;
+  groupMessagePromptDirectory?: string;
   state: EventStore;
   channel: ACPChannel;
   onLog?: (entry: DispatcherLogEntry) => void;
@@ -39,6 +40,9 @@ export class Dispatcher {
   private wakers: Array<() => void> = [];
   private readonly log: (entry: DispatcherLogEntry) => void;
   private inFlight: Promise<unknown> = Promise.resolve();
+  private paused = false;
+
+  pause(): void { this.paused = true; }
 
   constructor(private opts: DispatcherOptions) {
     this.log = opts.onLog ?? DEFAULT_LOG;
@@ -49,6 +53,7 @@ export class Dispatcher {
   }
 
   private async tickLocked(): Promise<{ dispatched: number }> {
+    if (this.paused) return { dispatched: 0 };
     const batch = await this.opts.state.nextPendingBatch(this.opts.agent, 32);
     if (batch.length === 0) return { dispatched: 0 };
 
@@ -74,7 +79,7 @@ export class Dispatcher {
   }
 
   async dispatchSpecific(batch: EventRow[]): Promise<void> {
-    if (batch.length === 0) return;
+    if (batch.length === 0 || this.paused) return;
     await this.serialize(() => this.dispatchBatch(batch));
   }
 
@@ -123,6 +128,7 @@ export class Dispatcher {
   }
 
   private async dispatchBatch(batch: EventRow[]): Promise<void> {
+    if (this.paused) return;
     const batchId = randomUUID();
     const ids = batch.map((r) => r.id);
     const claimed = await this.opts.state.markBatchSending(ids, batchId);
@@ -143,7 +149,7 @@ export class Dispatcher {
         gistsBefore = await board.latestOwnGistId();
       }
 
-      const payloads = await groupMessagePayloads(batch, this.opts.groupMessageDirectory, this.opts.agent);
+      const payloads = await groupMessagePayloads(batch, this.opts.groupMessageDirectory, this.opts.agent, this.opts.groupMessagePromptDirectory);
       await this.opts.channel.prompt(payloads);
       delivered = true;
       await this.opts.state.markBatchSent(batchId, Date.now());

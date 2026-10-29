@@ -123,7 +123,8 @@ async function main(): Promise<void> {
 
   const dispatcher = new Dispatcher({
     agent: env.agent,
-    groupMessageDirectory: "/opt/data/home/group-messages",
+    groupMessageDirectory: process.env.GROUP_MESSAGE_DIRECTORY ?? "/opt/data/home/group-messages",
+    groupMessagePromptDirectory: process.env.GROUP_MESSAGE_PROMPT_DIRECTORY,
     state: store,
     channel,
     board,
@@ -169,6 +170,7 @@ async function main(): Promise<void> {
         state: store,
         baseUrl: env.mattermostHost,
         token: mmToken,
+        channelIds: process.env.PERSISTENT_TEAM_CHANNEL_IDS ? JSON.parse(process.env.PERSISTENT_TEAM_CHANNEL_IDS) as string[] : undefined,
         ...(env.mattermostHostHeader ? { hostHeader: env.mattermostHostHeader } : {}),
         onIngest: (n) => {
           log("info", `mattermost ingested ${n} events; waking dispatcher`);
@@ -187,6 +189,15 @@ async function main(): Promise<void> {
 
   const server = createServer(async (req, res) => {
     try {
+      if (req.method === "POST" && req.url === "/pause") {
+        const secret = process.env.PERSISTENT_CONTROL_TOKEN;
+        if (!secret || req.headers["x-control-token"] !== secret) {
+          res.statusCode = 403; res.end("forbidden"); return;
+        }
+        dispatcher.pause();
+        res.end(JSON.stringify({ paused: true, active_turn: "draining" }));
+        return;
+      }
       if (req.url === "/healthz") {
         // Health reflects the Gitea SSE connection, not model or turn progress.
         const sse = listener.sse;

@@ -33,14 +33,16 @@ function messageText(payload: UEMLike): string {
   return String(payload.summary ?? "");
 }
 
-export async function groupMessagePayloads(batch: EventRow[], directory: string, username: string): Promise<UEMLike[]> {
+export async function groupMessagePayloads(batch: EventRow[], directory: string, username: string, promptDirectory = directory): Promise<UEMLike[]> {
   const limit = 32;
   const messages = batch.filter((row) => isGroupMessage(row.payload));
   if (messages.length <= limit) return batch.map((row) => row.payload);
   const earlier = messages.slice(0, -limit);
   const latest = new Set(messages.slice(-limit).map((row) => row.id));
   const digest = createHash("sha256").update(messages.map((row) => row.id).join(",")).digest("hex").slice(0, 16);
-  const path = join(directory, `group-messages-${digest}.jsonl`);
+  const filename = `group-messages-${digest}.jsonl`;
+  const path = join(directory, filename);
+  const promptPath = join(promptDirectory, filename);
   await mkdir(directory, { recursive: true, mode: 0o755 });
   const temporary = path + "." + randomUUID() + ".tmp";
   try {
@@ -70,10 +72,10 @@ export async function groupMessagePayloads(batch: EventRow[], directory: string,
   const notice: UEMLike = {
     event_id: `group-message-history:${digest}`, source: "system", target_agent: last.target_agent,
     kind: "group_message_history", observed_at: last.observed_at,
-    summary: `Showing the latest ${limit} group-chat messages. ${earlier.length} earlier messages are saved in ${path} `
+    summary: `Showing the latest ${limit} group-chat messages. ${earlier.length} earlier messages are saved in ${promptPath} `
       + `(the file contains all ${messages.length} queued group-chat messages, including full message text). `
       + `You are mentioned ${count} times in the earlier messages. Search the file for "${handle}" to find your mentions.`,
-    raw: { path, total: messages.length, earlier: earlier.length, mentions: count, username },
+    raw: { path: promptPath, total: messages.length, earlier: earlier.length, mentions: count, username },
   };
   return [notice, ...batch.filter((row) => !isGroupMessage(row.payload) || latest.has(row.id)).map((row) => row.payload)];
 }
