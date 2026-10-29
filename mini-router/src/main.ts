@@ -5,6 +5,7 @@
 import { EventStore } from "./state.ts";
 import { Dispatcher } from "./dispatcher.ts";
 import { ACPSocketChannel } from "./acp_socket_channel.ts";
+import { createHostEventSink } from "./acp_events.ts";
 import { GiteaListener } from "./listeners/gitea/listener.ts";
 import { GiteaFormAuth } from "./gitea_form_auth.ts";
 import { MattermostListener } from "./listeners/mattermost/listener.ts";
@@ -104,6 +105,7 @@ async function main(): Promise<void> {
       set: (sessionId) => store.setKv(env.agent, "acp_session_id:copilot", sessionId),
     },
     stuckMs,
+    onEvent: createHostEventSink(process.env.TROY_EVENT_PATH, env.agent),
   });
 
   const board = new BoardClient({

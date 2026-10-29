@@ -129,15 +129,20 @@ def read_events(path):
 
 
 def _summary(events, ledger_errors=()):
-    starts, finishes, attempts, done = {}, {}, {}, {}
+    starts, finishes, upstream_finishes, attempts, done = {}, {}, {}, {}, {}
     for e in events:
         key = (e.get("episode_id"), e.get("request_id"))
         if e.get("event") == "request_started": starts[key] = e
         elif e.get("event") == "request_finished": finishes[key] = e
+        elif e.get("event") == "request_upstream_finished": upstream_finishes[key] = e
         elif e.get("event") == "attempt_started": attempts[(*key, e.get("attempt"))] = e
         elif e.get("event") == "attempt_finished": done[(*key, e.get("attempt"))] = e
     unfinished = len(set(attempts) - set(done))
-    unresolved_requests = len(set(starts) - set(finishes))
+    # Old ledgers only have request_finished. New relays commit the upstream
+    # transaction before sending the body, then record actual client delivery.
+    # Count attempts once regardless of how many terminal facts are present.
+    unresolved_requests = len(set(starts) - (set(upstream_finishes) | set(finishes)))
+    pending_client_deliveries = len(set(upstream_finishes) - set(finishes))
     usage_rows = [e.get("usage", {}) for e in done.values()]
     incomplete = sum(not u.get("accounting_complete", False) for u in usage_rows)
     complete = bool(not ledger_errors and not unfinished and not unresolved_requests and not incomplete)
@@ -150,6 +155,7 @@ def _summary(events, ledger_errors=()):
         totals[field] = known[field] if complete and not missing[field] else None
     return {"requests": len(starts), "attempts": len(attempts), "finished_attempts": len(done),
             "unfinished_requests": unresolved_requests, "unfinished_attempts": unfinished,
+            "pending_client_deliveries": pending_client_deliveries,
             "incomplete_usage_attempts": incomplete, "accounting_complete": complete,
             "totals": totals, "known_tokens": known, "missing_counts": missing,
             "ledger_errors": list(ledger_errors)}

@@ -96,6 +96,33 @@ def test_interrupted_attempt_preserves_known_lower_bound_and_unknown_total():
     assert not result["accounting_complete"]
 
 
+def test_upstream_completion_accounts_once_while_client_delivery_is_pending():
+    events = complete_events()
+    delivered = {**events[-1], "delivery": "client_disconnected"}
+    events[-1] = {**events[-1], "event": "request_upstream_finished"}
+    pending = aggregate_usage(events)["total"]
+    assert pending["totals"]["total_tokens"] == 100
+    assert pending["unfinished_requests"] == 0
+    assert pending["pending_client_deliveries"] == 1
+    finished = aggregate_usage(events + [delivered] + events)["total"]
+    assert finished["totals"]["total_tokens"] == 100
+    assert finished["requests"] == finished["attempts"] == 1
+    assert finished["pending_client_deliveries"] == 0
+
+
+def test_upstream_completion_does_not_promote_missing_or_unfinished_usage():
+    for missing_attempt_end in (False, True):
+        events = complete_events()
+        events[-1] = {**events[-1], "event": "request_upstream_finished"}
+        if missing_attempt_end:
+            del events[2]
+        else:
+            events[2]["usage"] = extract_usage(b'{}')
+        result = aggregate_usage(events)["total"]
+        assert not result["accounting_complete"]
+        assert result["totals"]["total_tokens"] is None
+
+
 def test_missing_ledger_is_not_a_zero_token_episode(tmp_path):
     result = summarize_episode_usage(tmp_path / 'missing', ['victim'])
     assert result["agents"]["victim"]["totals"]["total_tokens"] is None

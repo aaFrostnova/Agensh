@@ -22,7 +22,8 @@ REPO = Path(__file__).resolve().parents[3]
 @pytest.fixture
 def relay(tmp_path):
     processes, servers, logs, live_dirs = [], [], [], []
-    def start(mode="json", legacy=False):
+    delivery_gates = []
+    def start(mode="json", legacy=False, hold_delivery_log=False):
         seen = []
         class Fake(BaseHTTPRequestHandler):
             def log_message(self, *a): pass
@@ -63,7 +64,33 @@ def relay(tmp_path):
         (live / 'logs').mkdir(parents=True)
         log = (live / 'logs' / 'relay.log').open('w')
         logs.append(log); live_dirs.append(live)
-        proc = subprocess.Popen([sys.executable, str(REPO / 'scripts/strip_metadata_proxy.py')],
+        command = [sys.executable, str(REPO / 'scripts/strip_metadata_proxy.py')]
+        if hold_delivery_log:
+            entered, release = live / 'delivery-log-entered', live / 'release-delivery-log'
+            delivery_gates.append((entered, release))
+            # Hold the post-delivery journal call behind an explicit gate. The
+            # client can finish while request_finished is provably absent.
+            bootstrap = '''
+import runpy, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from peer_influence import usage
+original_append = usage.append_event
+def append_with_gate(path, event):
+    if event["event"] == "request_finished":
+        Path(sys.argv[3]).touch()
+        deadline = time.monotonic() + 10
+        while not Path(sys.argv[4]).exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("test delivery gate not released")
+            time.sleep(.005)
+    return original_append(path, event)
+usage.append_event = append_with_gate
+runpy.run_path(sys.argv[2], run_name="__main__")
+'''
+            command = [sys.executable, '-c', bootstrap, str(REPO / 'experiments'),
+                       str(REPO / 'scripts/strip_metadata_proxy.py'), str(entered), str(release)]
+        proc = subprocess.Popen(command,
                                 env=env, stdout=log, stderr=subprocess.DEVNULL)
         processes.append(proc)
         url = f'http://127.0.0.1:{port}'
@@ -75,8 +102,10 @@ def relay(tmp_path):
             time.sleep(.02)
         else: raise AssertionError('relay not ready')
         return url, ledger, seen
-    start.processes, start.live_dirs = processes, live_dirs
+    start.processes, start.live_dirs, start.delivery_gates = processes, live_dirs, delivery_gates
     yield start
+    for _, release in delivery_gates:
+        release.touch()
     for proc in processes:
         proc.terminate(); proc.wait(timeout=5)
     for server in servers:
@@ -110,6 +139,34 @@ def test_unknown_actor_key_rejected_before_model_request(relay):
     url, ledger, seen = relay()
     assert request(url, 'spoofed').status_code == 401
     assert not seen and ledger.read_text() == ''
+
+
+@pytest.mark.parametrize('mode', ['json', 'sse', 'missing'])
+def test_usage_is_durable_when_client_returns_before_delivery_journal(relay, mode):
+    url, ledger, _ = relay(mode, hold_delivery_log=True)
+    assert request(url).status_code == 200
+    entered, release = relay.delivery_gates[-1]
+    for _ in range(100):
+        if entered.exists(): break
+        time.sleep(.005)
+    else: raise AssertionError('delivery journal gate not entered')
+    events, errors = read_events(ledger)
+    assert not errors
+    assert not any(e['event'] == 'request_finished' for e in events)
+    assert sum(e['event'] == 'request_upstream_finished' for e in events) == 1
+    pending = summarize_episode_usage(ledger)['total']
+    assert pending['requests'] == pending['attempts'] == 1
+    assert pending['pending_client_deliveries'] == 1
+    assert pending['totals']['total_tokens'] == (None if mode == 'missing' else 15)
+    assert pending['accounting_complete'] == (mode != 'missing')
+    release.touch()
+    for _ in range(100):
+        done = summarize_episode_usage(ledger)['total']
+        if not done['pending_client_deliveries']: break
+        time.sleep(.005)
+    else: raise AssertionError('delivery journal did not finish after release')
+    assert done['requests'] == done['attempts'] == 1
+    assert done['totals'] == pending['totals']
 
 
 def test_both_actor_keys_are_attributed_separately(relay):

@@ -18,6 +18,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 from peer_influence.usage import append_event, extract_usage
+from troy_replication.journal import request_receipts, response_outcome, emit as troy_emit
 
 UPSTREAM = os.environ.get("UPSTREAM", "").strip()
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "4180"))
@@ -99,6 +100,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(400, "Invalid request framing")
             return
         model, effort = None, None
+        troy_receipts = []
         if body and "json" in self.headers.get("Content-Type", "").lower():
             try:
                 data = json.loads(body)
@@ -120,8 +122,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if EXPECTED_MODEL:
                         data["model"] = EXPECTED_MODEL
                     data.update(EXTRA_BODY)
+                    policy_path = os.environ.get("TROY_VICTIM_SYSTEM_FILE")
+                    if agent_id == "victim" and policy_path:
+                        policy = Path(policy_path).read_text(encoding="utf-8").strip()
+                        if not policy:
+                            raise ValueError("empty victim policy")
+                        if "/responses" in self.path:
+                            original = data.get("instructions") or ""
+                            data["instructions"] = policy + ("\n\n" + original if original else "")
+                        else:
+                            data["messages"] = [{"role": "system", "content": policy}, *data.get("messages", [])]
                     model = data.get("model")
                     effort = (data.get("reasoning") or {}).get("effort", data.get("reasoning_effort"))
+                    if agent_id == "victim" and os.environ.get("TROY_CONTEXT_REGISTRY"):
+                        troy_receipts = request_receipts(data, os.environ["TROY_CONTEXT_REGISTRY"])
+                        if policy_path:
+                            import hashlib
+                            troy_emit(os.environ["TROY_CONTEXT_EVENT_PATH"], "victim_policy_applied",
+                                      request_id=rid, policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
+                                      delivery="responses_instructions" if "/responses" in self.path else "system_message")
                     body = json.dumps(data).encode()
             except (ValueError, TypeError, AttributeError):
                 self.send_error(400, "Invalid model JSON payload")
@@ -172,11 +191,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not retry:
                 break
             time.sleep([1, 2, 5, 12][min(attempt - 1, 3)])
+        # Commit the end of the upstream billing transaction before exposing any
+        # response bytes. Client delivery finishes later and is a separate fact:
+        # a disconnect must not hide already incurred, provider-reported usage.
+        record("request_upstream_finished", status=status, error=error)
         if error is not None:
             record("request_finished", status=status, delivery="upstream_incomplete", error=error)
             print(f"[proxy {rid}] {self.command} {self.path.split('?', 1)[0]} in={len(body)}b -> BAD: {error}", flush=True)
             self.send_error(502, "Upstream response incomplete")
             return
+        if status is not None and 200 <= status < 300 and troy_receipts:
+            for receipt in troy_receipts:
+                troy_emit(os.environ["TROY_CONTEXT_EVENT_PATH"], "message_context_included",
+                          request_id=rid, agent_id=agent_id, **receipt)
         self.send_response(status)
         for key, value in resp_headers:
             if key.lower() not in HOP_BY_HOP:
@@ -189,7 +216,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
         except (OSError, ConnectionError):
             delivery = "client_disconnected"
-        record("request_finished", status=status, delivery=delivery)
+        record("request_finished", status=status, delivery=delivery, **response_outcome(resp_body, ct))
         # Keep the legacy method/path/status shape consumed by relay_stats().
         print(f"[proxy {rid}] {self.command} {self.path.split('?', 1)[0]} in={len(body)}b -> {status} "
               f"out={len(resp_body)}b actor={agent_id or 'unattributed'} {delivery}", flush=True)

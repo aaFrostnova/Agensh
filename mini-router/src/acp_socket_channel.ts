@@ -4,6 +4,8 @@
  */
 import * as acp from "@agentclientprotocol/sdk";
 import { createConnection, type Socket } from "node:net";
+import { randomUUID } from "node:crypto";
+import { projectSessionUpdate, type HostEventSink } from "./acp_events.ts";
 import type { UEM } from "./uem.ts";
 import { errorMessage, sleep } from "./runtime.ts";
 
@@ -17,6 +19,7 @@ export interface ACPSocketChannelOptions {
     set(sessionId: string): Promise<void>;
   };
   stuckMs?: number;
+  onEvent?: HostEventSink;
   onLog?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 }
 
@@ -25,6 +28,7 @@ export class ACPSocketChannel {
   private connection: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
   private lastUpdateAt = 0;
+  private activeTurnId: string | null = null;
   private connecting: Promise<void> | null = null;
   private pendingNotice: string | null = null;
   private promptPrefix: string | null = null;
@@ -54,7 +58,7 @@ export class ACPSocketChannel {
       this.promptPrefix = null;
     }
 
-    return this.sendText(text);
+    return this.sendText(text, events.map((event) => event.event_id));
   }
 
   setPromptPrefix(prefix: string | null): void {
@@ -68,7 +72,10 @@ export class ACPSocketChannel {
     return this.sendText(text);
   }
 
-  private async sendText(text: string): Promise<{ stopReason: string }> {
+  private async sendText(text: string, eventIds: string[] = []): Promise<{ stopReason: string }> {
+    const turnId = randomUUID();
+    this.activeTurnId = turnId;
+    this.opts.onEvent?.({ event: "acp_prompt_started", turn_id: turnId, session_id: this.sessionId, source_event_ids: eventIds });
     try {
       this.lastUpdateAt = Date.now();
       const stuckMs = this.opts.stuckMs;
@@ -87,11 +94,17 @@ export class ACPSocketChannel {
       } else {
         res = await promptP;
       }
+      this.opts.onEvent?.({ event: "acp_prompt_finished", turn_id: turnId,
+        session_id: this.sessionId, stop_reason: res.stopReason, source_event_ids: eventIds });
       return { stopReason: res.stopReason };
     } catch (err) {
+      this.opts.onEvent?.({ event: "acp_prompt_failed", turn_id: turnId,
+        session_id: this.sessionId, error_type: err instanceof Error ? err.name : "UnknownError", source_event_ids: eventIds });
       this.log("warn", `prompt failed; closing connection`, err);
       await this.close();
       throw err;
+    } finally {
+      this.activeTurnId = null;
     }
   }
 
@@ -194,7 +207,7 @@ export class ACPSocketChannel {
     const readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         sock.on("data", (chunk: Buffer) => {
-          this.log("info", `RX ${chunk.length}B: ${chunk.toString("utf8").slice(0, 200)}`);
+          this.log("info", this.opts.onEvent ? `RX ${chunk.length}B` : `RX ${chunk.length}B: ${chunk.toString("utf8").slice(0, 200)}`);
           controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
         });
         sock.on("end", () => {
@@ -231,8 +244,12 @@ export class ACPSocketChannel {
     const stream = acp.ndJsonStream(writable, readable);
 
     const conn = new acp.ClientSideConnection(
-      () => clientImpl(() => {
+      () => clientImpl((params) => {
         this.lastUpdateAt = Date.now();
+        if (this.opts.onEvent) {
+          const event = projectSessionUpdate(params);
+          if (event) this.opts.onEvent({ ...event, turn_id: this.activeTurnId });
+        }
       }),
       stream,
     );
@@ -288,7 +305,7 @@ export class ACPSocketChannel {
   }
 }
 
-function clientImpl(onSessionUpdate: () => void): acp.Client {
+function clientImpl(onSessionUpdate: (params: unknown) => void): acp.Client {
   // Workers run autonomously; prefer ACP's one-time permission grant when offered.
   return {
     async requestPermission(params: acp.RequestPermissionRequest) {
@@ -302,8 +319,8 @@ function clientImpl(onSessionUpdate: () => void): acp.Client {
         },
       };
     },
-    async sessionUpdate(_params: unknown) {
-      onSessionUpdate();
+    async sessionUpdate(params: unknown) {
+      onSessionUpdate(params);
     },
   };
 }

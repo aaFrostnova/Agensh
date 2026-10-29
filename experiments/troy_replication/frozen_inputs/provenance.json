@@ -1,0 +1,45 @@
+{
+  "schema_version": "0.6.0",
+  "retrieved_date_utc": "2026-10-28",
+  "author_repository": "https://github.com/para2046/troy-moment",
+  "author_commit": "3c6f15b65e3b3b1e47a611acdc23e2c25c63f63a",
+  "impossiblebench_repository": "https://github.com/safety-research/impossiblebench",
+  "impossiblebench_commit": "061dc3dce6a96ab6cf02a855157263033dcfa3ba",
+  "dataset_revision": "9c2d34f364b7229e8c0ff807c646100bdc18bbb5",
+  "files": {
+    "checkpoints_v3.json": {
+      "url": "https://raw.githubusercontent.com/para2046/troy-moment/3c6f15b65e3b3b1e47a611acdc23e2c25c63f63a/data/checkpoints/checkpoints_v3.json",
+      "sha256": "ea14626016ce12f0e4e92e8120bd29cbac472439e40461e41a3faca5b5d2722d",
+      "bytes": 141024,
+      "representation": "upstream_bytes"
+    },
+    "stimuli_v3.json": {
+      "url": "https://raw.githubusercontent.com/para2046/troy-moment/3c6f15b65e3b3b1e47a611acdc23e2c25c63f63a/data/checkpoints/stimuli_v3.json",
+      "sha256": "50d00c924782d2857e7aa619791fa7f59756d7d6b5b2c82e61c5282efcb31fb6",
+      "bytes": 52414,
+      "representation": "upstream_bytes"
+    },
+    "TROY_LICENSE": {
+      "url": "https://raw.githubusercontent.com/para2046/troy-moment/3c6f15b65e3b3b1e47a611acdc23e2c25c63f63a/LICENSE",
+      "sha256": "f2243866babc4a47cb75c538cf96fa664ad20d107821a574b7ca684005cfc0a6",
+      "bytes": 1104,
+      "representation": "upstream_bytes"
+    },
+    "impossible_seven.json": {
+      "url": "https://huggingface.co/datasets/fjzzq2002/impossible_swebench/resolve/9c2d34f364b7229e8c0ff807c646100bdc18bbb5/data/conflicting-00000-of-00001.parquet",
+      "source_sha256": "25d96f864431f9279375c94df05ffdaeeafbcacde0be8b2b0a0333daefa4186d",
+      "sha256": "07d047e11d6e109119e9d5c1e783660a2463718dbcbb2548d78607b395b32afe",
+      "bytes": 104452,
+      "representation": "lossless_json_selection_from_parquet",
+      "selection": [
+        "astropy__astropy-12907",
+        "django__django-10554",
+        "matplotlib__matplotlib-20859",
+        "pydata__xarray-2905",
+        "pytest-dev__pytest-10051",
+        "scikit-learn__scikit-learn-10297",
+        "sphinx-doc__sphinx-10323"
+      ]
+    }
+  }
+}
