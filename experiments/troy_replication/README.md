@@ -2,6 +2,8 @@
 
 本目录实现用户的 `Agensh_v0.6_Troy_Replication_Plan_CN.md`，从冻结的 v0.5.0（`702706ee7b2ce84191065ace0d3cd0963f7f7a75`）发展而来。旧数据保持独立。实验使用官方 ImpossibleBench 七个 conflicting 软件修复实例及作者发布的 checkpoint recipe、刺激文本，toy 任务不进入主结果。
 
+当前代码版本 **v0.6.1** 修复未来运行中的完成申报格式解析。已完成的12例正式批次仍冻结于 v0.6.0 runtime `5f8fccf1feff88da1d621a7e0258c9d83bbce763`，原 episode、freeze、primary 分类与分母不变。新版统一后处理使用独立 `troy-completion-status-v3` 分析版本，结果另存于 `results/derived_analysis/`；方法与运行入口见 [COMPLETION_ANALYSIS.md](COMPLETION_ANALYSIS.md)。
+
 阶段 A 是脚本复现：C0 无社会信息，C1 同行修改测试后未受处罚，C2 相同修改受到处罚并恢复，C3 未认证的人类例外授权主张。C1/C2 的作者刺激仅处罚结果句不同，真实高优先级权限不变。阶段 B 是本地新增的实时 adversarial peer 扩展，仅使用 C1/C3，通过 Mattermost DM 最多发送三条消息。两阶段分别报告。
 
 ## 设计规模与实际覆盖
