@@ -5,6 +5,8 @@ Set USAGE_LOG_PATH and USAGE_ACTOR_TOKENS_JSON (agent_id -> unique local API key
 for audited requests. These keys are never sent upstream or written to the ledger.
 """
 import hmac
+import hashlib
+import fcntl
 import http.client
 import http.server
 import json
@@ -70,6 +72,93 @@ def _cap_output(data, path, budget):
     data[field] = min(asked, ceiling)
     if "/chat/completions" in path:
         data.pop("max_tokens" if field == "max_completion_tokens" else "max_completion_tokens", None)
+
+
+def _instruction_text(data, path):
+    """Select only instruction fields, never the task input or tool results."""
+    if "/responses" in path:
+        value = data.get("instructions")
+        if value is not None and not isinstance(value, str):
+            raise ValueError("instruction audit requires text instructions")
+        return {"format": "responses_instructions", "field_present": "instructions" in data, "text": value}
+    if "/chat/completions" in path:
+        messages = []
+        for message in data.get("messages") or []:
+            if not isinstance(message, dict) or message.get("role") not in ("system", "developer"):
+                continue
+            content = message.get("content")
+            if isinstance(content, list):
+                # Only documented text parts of high-priority messages qualify.
+                content = [{"type": item.get("type"), "text": item["text"]} for item in content
+                           if isinstance(item, dict) and item.get("type") in ("text", "input_text")
+                           and isinstance(item.get("text"), str)]
+            elif content is not None and not isinstance(content, str):
+                raise ValueError("instruction audit requires textual system content")
+            messages.append({"role": message["role"], "content": content})
+        return {"format": "chat_high_priority_messages_json", "field_present": bool(messages),
+                "text": json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+    return None
+
+
+def _save_instruction_audit(directory, *, agent_id, request_id, path, body, original_sdk,
+                            pre_policy, injected_policy, context_event_path):
+    """Persist a minimal host-only view of the final wire body's instructions."""
+    effective = _instruction_text(json.loads(body), path)
+    if effective is None:
+        return None
+    def with_hash(value):
+        return {**value, "sha256": hashlib.sha256(value["text"].encode("utf-8")).hexdigest()
+                if value["text"] is not None else None}
+    content = {"schema_version": 1, "agent_id": agent_id,
+               "effective": with_hash(effective), "original_sdk": with_hash(original_sdk),
+               "pre_policy": with_hash(pre_policy),
+               "injected_policy": with_hash({"format": "text", "field_present": injected_policy is not None,
+                                              "text": injected_policy}),
+               "scope": "Only instruction fields, as sent to the configured upstream. This is not a provider-internal system prompt or evidence of successful provider acceptance."}
+    raw = (json.dumps(content, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    directory = Path(directory)
+    if directory.is_symlink():
+        raise ValueError("instruction audit directory must not be a symlink")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
+    artifact = directory / (digest + ".json")
+    lockfd = os.open(directory / ".audit.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(lockfd, 0o600)
+        fcntl.flock(lockfd, fcntl.LOCK_EX)
+        if artifact.exists():
+            if artifact.is_symlink() or artifact.read_bytes() != raw:
+                raise ValueError("instruction audit artifact integrity error")
+            os.chmod(artifact, 0o600)
+        else:
+            temporary = directory / (".audit-" + uuid.uuid4().hex + ".tmp")
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, artifact)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+        fields = {"request_id": request_id, "agent_id": agent_id,
+                  "effective_sha256": content["effective"]["sha256"],
+                  "original_sdk_sha256": content["original_sdk"]["sha256"],
+                  "injected_policy_sha256": content["injected_policy"]["sha256"],
+                  "artifact_sha256": digest, "artifact_path": str(artifact.resolve()),
+                  "request_body_sha256": hashlib.sha256(body).hexdigest(),
+                  "stage": "prepared_before_upstream_attempt"}
+        troy_emit(context_event_path or str(directory / "request_events.jsonl"), "instruction_audit_saved", **fields)
+        return fields
+    finally:
+        os.close(lockfd)
 
 
 def _timed_out(exc):
@@ -144,6 +233,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         model, effort = None, None
         troy_receipts = []
+        audit_dir = json.loads(os.environ.get("TROY_ACTOR_INSTRUCTION_AUDIT_DIRS_JSON", "{}")).get(agent_id)
+        audit_original_sdk = audit_pre_policy = None
+        audit_injected_policy = None
         context_event_path = _actor_path(agent_id, "TROY_ACTOR_CONTEXT_EVENT_PATHS_JSON", "TROY_CONTEXT_EVENT_PATH")
         if budgeted and (not body or "json" not in self.headers.get("Content-Type", "").lower()):
             self.send_error(400, "Budgeted actors require complete text JSON history")
@@ -154,6 +246,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if budgeted and unbounded_input_reference(data):
                     raise ValueError("unbounded server-side input reference")
                 if isinstance(data, dict):
+                    if audit_dir:
+                        audit_original_sdk = _instruction_text(data, self.path)
                     data.pop("metadata", None)
                     if "/responses" in self.path:
                         inc = data.get("include")
@@ -172,11 +266,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         data["model"] = EXPECTED_MODEL
                     data.update(EXTRA_BODY)
                     _cap_output(data, self.path, budget)
+                    if audit_dir:
+                        audit_pre_policy = _instruction_text(data, self.path)
                     policy_path = _actor_path(agent_id, "TROY_ACTOR_POLICY_FILES_JSON", "TROY_VICTIM_SYSTEM_FILE")
                     if policy_path:
                         policy = Path(policy_path).read_text(encoding="utf-8").strip()
                         if not policy:
                             raise ValueError("empty actor policy")
+                        audit_injected_policy = policy
                         if "/responses" in self.path:
                             original = data.get("instructions") or ""
                             data["instructions"] = policy + ("\n\n" + original if original else "")
@@ -190,7 +287,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             raise ValueError("context registry requires event path")
                         troy_receipts = request_receipts(data, context_registry)
                     if policy_path and context_event_path:
-                        import hashlib
                         troy_emit(context_event_path, "victim_policy_applied" if agent_id == "victim" else "actor_policy_applied",
                                   request_id=rid, agent_id=agent_id, policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
                                   delivery="responses_instructions" if "/responses" in self.path else "system_message")
@@ -219,6 +315,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         attempts = max(1, int(os.environ.get("UPSTREAM_RETRY_ATTEMPTS", "4")))
         timeout = float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", "600"))
         resp_headers, resp_body, status, error = [], b"", None, None
+        audit_saved = False
         for attempt in range(1, attempts + 1):
             if budgeted:
                 try:
@@ -243,6 +340,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(raw)
                     print(f"[proxy {rid}] {self.command} {self.path.split('?', 1)[0]} in={len(body)}b -> 402 "
                           f"out={len(raw)}b actor={agent_id} budget_denied", flush=True)
+                    return
+            if self.command == "POST" and audit_dir and audit_original_sdk is not None and not audit_saved:
+                try:
+                    _save_instruction_audit(audit_dir, agent_id=agent_id, request_id=rid, path=self.path, body=body,
+                                            original_sdk=audit_original_sdk, pre_policy=audit_pre_policy,
+                                            injected_policy=audit_injected_policy, context_event_path=context_event_path)
+                    audit_saved = True
+                except (OSError, ValueError, TypeError):
+                    record("request_upstream_finished", status=503, error="instruction_audit_unavailable")
+                    record("request_finished", status=503, delivery="instruction_audit_unavailable")
+                    self.send_error(503, "Instruction audit unavailable")
                     return
             record("attempt_started", attempt=attempt)
             started = time.monotonic()
@@ -318,11 +426,16 @@ def main():
         if not USAGE_LOG_PATH or not set(budget.actors).issubset(ACTOR_TOKENS):
             sys.exit("FATAL: budget requires usage accounting and credentials for every budgeted actor")
         budget.snapshot()
-    for env_name in ("TROY_ACTOR_POLICY_FILES_JSON", "TROY_ACTOR_CONTEXT_REGISTRIES_JSON", "TROY_ACTOR_CONTEXT_EVENT_PATHS_JSON"):
+    for env_name in ("TROY_ACTOR_POLICY_FILES_JSON", "TROY_ACTOR_CONTEXT_REGISTRIES_JSON", "TROY_ACTOR_CONTEXT_EVENT_PATHS_JSON",
+                     "TROY_ACTOR_INSTRUCTION_AUDIT_DIRS_JSON"):
         mapping = json.loads(os.environ.get(env_name, "{}"))
         if not isinstance(mapping, dict) or any(actor not in ACTOR_TOKENS or not isinstance(path, str) or not path
                                                for actor, path in mapping.items()):
             sys.exit(f"FATAL: {env_name} must map authenticated actors to nonempty paths")
+        if env_name == "TROY_ACTOR_INSTRUCTION_AUDIT_DIRS_JSON":
+            directories = [Path(path).resolve() for path in mapping.values()]
+            if len(set(directories)) != len(directories) or any(not Path(path).is_absolute() for path in mapping.values()):
+                sys.exit("FATAL: instruction audit requires distinct absolute directories for each actor")
     if USAGE_LOG_PATH:
         # An empty valid ledger distinguishes a genuine zero-call run from lost evidence.
         fd = os.open(USAGE_LOG_PATH, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)

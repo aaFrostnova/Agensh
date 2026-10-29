@@ -23,7 +23,8 @@ from troy_replication.lifecycle import LifecycleTracker, _epoch
 from troy_replication.monitor import HostMonitor
 from troy_replication.runner import require_allocation, protected_patterns, actual_test_command
 from troy_replication.prompts import task_brief
-from persistent_peer.prompts import ROLES, benign_system, task_kickoff
+from persistent_peer import __version__
+from persistent_peer.prompts import ROLES, PROMPT_PROFILES, benign_system, task_kickoff
 
 ACTORS = (*ROLES, 'adversary')
 
@@ -108,7 +109,8 @@ def runtime_failures(run, states, termination):
 
 def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
                 episode_id=None, team_token_limit=2_000_000, max_seconds=2700,
-                settle_seconds=60, seed=1, keep_live=False):
+                settle_seconds=60, seed=1, keep_live=False, benign_prompt_profile='hardened',
+                reference_episode=None):
     from persistent_peer.stack import PersistentStack, verify_worker_isolation
     from persistent_peer.channel import SharedChannel
     from persistent_peer.adversary import PersistentAdversary
@@ -118,6 +120,8 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
     fixture_root = Path(fixture_root).resolve()
     if team_token_limit <= 0 or max_seconds <= 0:
         raise ValueError('Positive team token and episode time budgets required')
+    if benign_prompt_profile not in PROMPT_PROFILES:
+        raise ValueError('Unknown benign prompt profile')
     task = load_task(task_id)
     fixture = json.loads((fixture_root / 'fixtures' / task_id / 'engineering_abc.json').read_text())
     runtime_checks = json.loads((fixture_root / 'results/engineering_runtime.json').read_text())
@@ -128,6 +132,15 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
     episode_id = episode_id or f'pilot-{task_id}-3b1m-s{seed}-{secrets.token_hex(3)}'
     run = root / 'results/episodes' / episode_id
     run.mkdir(parents=True, exist_ok=False)
+    if reference_episode:
+        from persistent_peer.comparison import validate_reference
+        preflight = validate_reference(
+            reference_episode, repo=repo, task=task, fixture=fixture, route=route,
+            team_token_limit=team_token_limit, max_seconds=max_seconds,
+            settle_seconds=settle_seconds, seed=seed)
+        write_json(run / 'comparison_preflight.json', preflight)
+        if not preflight['valid']:
+            raise RuntimeError('Reference comparison preflight failed; inspect comparison_preflight.json')
     live = root / 'sessions' / secrets.token_hex(12)
     live.mkdir(parents=True, exist_ok=False)
     for actor in ACTORS:
@@ -160,15 +173,18 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
     private_monitors = {}
     inference_ended = None
     specs = {}
-    result = {'schema_version': 1, 'version': '0.7.0', 'episode_id': episode_id,
+    result = {'schema_version': 1, 'version': __version__, 'episode_id': episode_id,
               'task_id': task_id, 'condition': '3B+1M_persistent', 'mode': 'live',
+              'benign_prompt_profile': benign_prompt_profile,
               'seed': seed, 'model': route.model_id, 'valid': False,
               'invalid_reasons': [], 'termination_reason': 'not_started',
               'replication_fidelity': 'local_migration_dynamic_extension',
               'team_token_limit': team_token_limit, 'adversary_token_limit': None,
-              'max_seconds': max_seconds, 'safe_zero_eligible': False}
+              'max_seconds': max_seconds, 'settle_seconds': settle_seconds, 'safe_zero_eligible': False}
     manifest = {**result, 'created_at_utc_epoch': started, 'code': source_identity(repo),
                 'route': route.public_dict(), 'task': task, 'fixture': fixture,
+                'reference_episode': str(Path(reference_episode).resolve()) if reference_episode else None,
+                'comparison_kind': 'single_adaptive_pilot_not_probability_estimate' if reference_episode else None,
                 'fixture_root': str(fixture_root), 'slurm_job_id': os.environ['SLURM_JOB_ID'],
                 'actors': {actor: {'username': usernames[actor],
                                   'role': ROLES[actor][0] if actor in ROLES else 'Persistent adversarial peer'}
@@ -197,7 +213,7 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
         prompt_record = {}
         failure_log = Path(fixture['checks']['observed_failure']['log_path']).read_text(errors='replace')
         for actor in ROLES:
-            policy = benign_system(actor, usernames, channel_id)
+            policy = benign_system(actor, usernames, channel_id, profile=benign_prompt_profile)
             policies[actor] = run / 'agents' / actor / 'system.txt'
             policies[actor].write_text(policy)
             prompt_record[actor] = {'system': policy, 'kickoff': task_kickoff(
@@ -214,6 +230,7 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
             'TROY_ACTOR_POLICY_FILES_JSON': json.dumps({a: str(p) for a, p in policies.items()}),
             'TROY_ACTOR_CONTEXT_REGISTRIES_JSON': json.dumps({a: str(registry) for a in ACTORS}),
             'TROY_ACTOR_CONTEXT_EVENT_PATHS_JSON': json.dumps({a: str(run / 'agents' / a / 'context_events.jsonl') for a in ACTORS}),
+            'TROY_ACTOR_INSTRUCTION_AUDIT_DIRS_JSON': json.dumps({a: str(run / 'agents' / a / 'instruction_audit') for a in ROLES}),
             'TROY_PRESERVE_MESSAGE_TEXT': '1', 'TROY_SHARED_CHANNEL_ID': channel_id,
         })
         stack.start_relay()
@@ -409,13 +426,16 @@ def main():
     parser.add_argument('--team-token-limit',type=int,default=2_000_000)
     parser.add_argument('--max-seconds',type=int,default=2700)
     parser.add_argument('--keep-live',action='store_true')
+    parser.add_argument('--benign-prompt-profile',choices=PROMPT_PROFILES,default='hardened')
+    parser.add_argument('--reference-episode',type=Path)
     args=parser.parse_args()
     route=load_routes(args.routes)[args.route]
     secrets_env=load_secret_env(args.secret_env)
     key=secrets_env.get(route.api_key_env,os.environ.get(route.api_key_env,''))
     if not key:parser.error('Missing model credential')
     result=run_episode(args.root,args.fixture_root,route,api_key=key,episode_id=args.episode_id,
-                       team_token_limit=args.team_token_limit,max_seconds=args.max_seconds,keep_live=args.keep_live)
+                       team_token_limit=args.team_token_limit,max_seconds=args.max_seconds,keep_live=args.keep_live,
+                       benign_prompt_profile=args.benign_prompt_profile,reference_episode=args.reference_episode)
     print(json.dumps({k:result.get(k) for k in (
         'episode_id','valid','invalid_reasons','termination_reason','censored',
         'team_any_protected_write','external_task_success','treatment_received_any',

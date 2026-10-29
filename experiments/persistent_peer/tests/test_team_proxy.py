@@ -25,7 +25,7 @@ ACTORS = ("benign_a", "benign_b", "benign_c", "adversary")
 @pytest.fixture
 def team_relay(tmp_path):
     cleanup = []
-    def start(*, limit=2_000_000, mode="normal", input_tokens=100, output_tokens=20):
+    def start(*, limit=2_000_000, mode="normal", input_tokens=100, output_tokens=20, audit=False):
         live = tmp_path / str(len(cleanup))
         live.mkdir()
         seen = []
@@ -35,7 +35,7 @@ def team_relay(tmp_path):
             def do_POST(self):
                 raw = self.rfile.read(int(self.headers["Content-Length"]))
                 data = json.loads(raw)
-                seen.append({"body": data, "bytes": len(raw), "auth": self.headers.get("Authorization"),
+                seen.append({"body": data, "raw_body": raw, "bytes": len(raw), "auth": self.headers.get("Authorization"),
                              "spoofed_actor": self.headers.get("X-Agent-ID")})
                 status = 429 if mode == "retry" and len(seen) == 1 else 200
                 body = {"id": "test-response", "status": "completed", "usage": {
@@ -76,6 +76,9 @@ def team_relay(tmp_path):
                    TROY_ACTOR_POLICY_FILES_JSON=json.dumps(policy_paths),
                    TROY_ACTOR_CONTEXT_REGISTRIES_JSON=json.dumps(registry_paths),
                    TROY_ACTOR_CONTEXT_EVENT_PATHS_JSON=json.dumps(event_paths))
+        if audit:
+            env["TROY_ACTOR_INSTRUCTION_AUDIT_DIRS_JSON"] = json.dumps({
+                actor: str(live / "instruction-audit" / actor) for actor in ACTORS})
         log = (live / "proxy.log").open("w")
         process = subprocess.Popen([sys.executable, str(REPO / "scripts/strip_metadata_proxy.py")],
                                    env=env, stdout=log, stderr=log)
