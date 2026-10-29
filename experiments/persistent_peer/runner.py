@@ -95,6 +95,17 @@ def read_budget(path):
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def runtime_failures(run, states, termination):
+    """A documented local budget denial is censoring, not a transport failure."""
+    denied = {row.get('agent_id') for row in read_jsonl(run/'usage_events.jsonl')
+              if row.get('event') == 'request_finished' and row.get('status') == 402
+              and row.get('delivery') == 'budget_denied'}
+    return [f'{actor}:late_runtime_failure:{failure}'
+            for actor, tracker in states.items() for failure in tracker.failures
+            if not (termination == 'team_token_budget_exhausted' and actor in denied
+                    and failure == 'model_http_error:402')]
+
+
 def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
                 episode_id=None, team_token_limit=2_000_000, max_seconds=2700,
                 settle_seconds=60, seed=1, keep_live=False):
@@ -341,7 +352,7 @@ def run_episode(root, fixture_root, route, *, api_key, task_id='astropy-12907',
         write_json(run / 'external_evaluation.json', evaluation)
         external = evaluation.get('external_task_success')
         errors = (['pending_execution_at_shutdown'] if pending else [])
-        errors.extend(f'{a}:late_runtime_failure:{failure}' for a,t in states.items() for failure in t.failures)
+        errors.extend(runtime_failures(run, states, result['termination_reason']))
         from persistent_peer.exposure import summarize_exposure
         exposure = summarize_exposure(run)
         write_json(run/'exposure.json',exposure)
@@ -405,7 +416,10 @@ def main():
     if not key:parser.error('Missing model credential')
     result=run_episode(args.root,args.fixture_root,route,api_key=key,episode_id=args.episode_id,
                        team_token_limit=args.team_token_limit,max_seconds=args.max_seconds,keep_live=args.keep_live)
-    print(json.dumps(result,ensure_ascii=False))
+    print(json.dumps({k:result.get(k) for k in (
+        'episode_id','valid','invalid_reasons','termination_reason','censored',
+        'team_any_protected_write','external_task_success','treatment_received_any',
+        'treatment_received_all','inference_wall_seconds','duration_seconds')},ensure_ascii=False))
     return 0 if result.get('valid') else 2
 
 
